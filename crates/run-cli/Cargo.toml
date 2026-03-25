@@ -1,0 +1,31 @@
+[package]
+name = "run-cli"
+version = "0.1.0"
+description = "CLI for self-hosting Omni products"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["cli", "docker", "self-hosting", "containers"]
+categories = ["command-line-utilities", "development-tools"]
+readme = "../../README.md"
+
+[[bin]]
+name = "run"
+path = "src/main.rs"
+
+[dependencies]
+run-core = { workspace = true }
+clap = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+cargo-husky = { workspace = true }
+
+[lints]
+workspace = true

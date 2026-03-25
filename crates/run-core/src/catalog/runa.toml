@@ -1,0 +1,168 @@
+name = "runa"
+display_name = "Runa"
+description = "Self-hosted Runa instance"
+
+# ── Services ──────────────────────────────────────────────────────────
+
+[[services]]
+name = "db"
+image = "postgres:16-alpine"
+volumes = ["db_data:/var/lib/postgresql/data"]
+
+[services.environment]
+POSTGRES_DB = "${DB_NAME:-runa}"
+POSTGRES_USER = "${DB_USER:-postgres}"
+POSTGRES_PASSWORD = "${DB_PASSWORD}"
+
+[services.healthcheck]
+test = ["CMD-SHELL", "pg_isready -U postgres"]
+interval = "5s"
+timeout = "5s"
+retries = 5
+
+[[services]]
+name = "auth-db"
+image = "postgres:16-alpine"
+volumes = ["auth_db_data:/var/lib/postgresql/data"]
+
+[services.environment]
+POSTGRES_DB = "${AUTH_DB_NAME:-auth}"
+POSTGRES_USER = "${DB_USER:-postgres}"
+POSTGRES_PASSWORD = "${DB_PASSWORD}"
+
+[services.healthcheck]
+test = ["CMD-SHELL", "pg_isready -U postgres"]
+interval = "5s"
+timeout = "5s"
+retries = 5
+
+[[services]]
+name = "auth"
+image = "ghcr.io/omnidotdev/gatekeeper-app:latest"
+depends_on = [{ service = "auth-db", condition = "service_healthy" }]
+
+[services.environment]
+NODE_ENV = "production"
+DATABASE_URL = "postgres://postgres:${DB_PASSWORD}@auth-db:5432/auth"
+VITE_APP_URL = "${AUTH_BASE_URL}"
+VITE_BASE_URL = "${AUTH_BASE_URL}"
+AUTH_SECRET = "${AUTH_SECRET}"
+TRUSTED_DOMAIN = "localhost"
+SENDER_EMAIL_ADDRESS = "noreply@localhost"
+ENABLE_BREACH_CHECK = "false"
+VITE_FLAGS_API_HOST = ""
+DEFAULT_CLIENT_ID = "${AUTH_CLIENT_ID}"
+DEFAULT_CLIENT_SECRET = "${AUTH_CLIENT_SECRET}"
+DEFAULT_CLIENT_REDIRECT_URIS = "${BASE_URL}/api/auth/oauth2/callback/omni"
+
+[[services]]
+name = "api"
+image = "ghcr.io/omnidotdev/runa-api:latest"
+extra_hosts = ["localhost:host-gateway"]
+depends_on = [{ service = "db", condition = "service_healthy" }]
+
+[services.environment]
+DATABASE_URL = "postgres://postgres:${DB_PASSWORD}@db:5432/runa"
+PORT = "4000"
+HOST = "0.0.0.0"
+NODE_ENV = "production"
+NODE_TLS_REJECT_UNAUTHORIZED = "0"
+CORS_ALLOWED_ORIGINS = "${BASE_URL}"
+AUTH_BASE_URL = "${AUTH_BASE_URL}"
+AUTHZ_ENABLED = "false"
+
+[services.healthcheck]
+test = ["CMD-SHELL", "bun healthcheck"]
+interval = "10s"
+timeout = "5s"
+retries = 3
+start_period = "10s"
+
+[[services]]
+name = "app"
+image = "ghcr.io/omnidotdev/runa-app:latest"
+extra_hosts = ["localhost:host-gateway"]
+depends_on = [
+  { service = "db", condition = "service_healthy" },
+  { service = "api", condition = "service_healthy" },
+  { service = "auth", condition = "service_started" },
+]
+
+[services.environment]
+NODE_ENV = "production"
+NODE_TLS_REJECT_UNAUTHORIZED = "0"
+BASE_URL = "${BASE_URL}"
+API_BASE_URL = "${API_BASE_URL}"
+API_INTERNAL_URL = "http://api:4000"
+DATABASE_URL = "postgres://postgres:${DB_PASSWORD}@db:5432/runa"
+AUTH_SECRET = "${AUTH_SECRET}"
+AUTH_BASE_URL = "${AUTH_BASE_URL}"
+AUTH_INTERNAL_URL = "http://auth:3000"
+AUTH_CLIENT_ID = "${AUTH_CLIENT_ID}"
+AUTH_CLIENT_SECRET = "${AUTH_CLIENT_SECRET}"
+VITE_BILLING_BASE_URL = ""
+VITE_CONSOLE_URL = ""
+
+[services.healthcheck]
+test = ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:3000/ || exit 1"]
+interval = "10s"
+timeout = "5s"
+retries = 3
+start_period = "15s"
+
+[[services]]
+name = "caddy"
+image = "caddy:2-alpine"
+depends_on = [
+  { service = "app", condition = "service_started" },
+  { service = "api", condition = "service_started" },
+  { service = "auth", condition = "service_started" },
+]
+
+# ── Secrets ───────────────────────────────────────────────────────────
+
+[secrets]
+auto = [
+  { name = "DB_PASSWORD", method = "hex", length = 32 },
+  { name = "AUTH_SECRET", method = "hex", length = 32 },
+  { name = "AUTH_CLIENT_ID", method = "hex", length = 16 },
+  { name = "AUTH_CLIENT_SECRET", method = "hex", length = 32 },
+]
+
+# ── TLS ───────────────────────────────────────────────────────────────
+
+[tls]
+provider = "mkcert"
+
+# ── Proxy ─────────────────────────────────────────────────────────────
+
+[proxy]
+provider = "caddy"
+routes = [
+  { name = "app", listen_port = 443, listen_port_http = 80, target = "app:3000" },
+  { name = "auth", listen_port = 3001, target = "auth:3000" },
+  { name = "api", listen_port = 4000, target = "api:4000" },
+]
+
+# ── Hooks ─────────────────────────────────────────────────────────────
+
+[[hooks]]
+name = "seed-oauth-client"
+wait_for = "healthy"
+type = "sql"
+target = "auth-db"
+database = "auth"
+sql = """
+INSERT INTO oauth_client (
+  id, client_id, client_secret, name, redirect_uris,
+  skip_consent, require_pkce, grant_types, response_types,
+  token_endpoint_auth_method, created_at, updated_at
+) SELECT
+  gen_random_uuid(), '$AUTH_CLIENT_ID', '$AUTH_CLIENT_SECRET_HASH',
+  'default', ARRAY['$REDIRECT_URI'],
+  true, true,
+  ARRAY['authorization_code', 'refresh_token'],
+  ARRAY['code'],
+  'client_secret_post', NOW(), NOW()
+WHERE NOT EXISTS (SELECT 1 FROM oauth_client WHERE client_id = '$AUTH_CLIENT_ID');
+"""
