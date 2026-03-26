@@ -7,7 +7,7 @@ use crate::orchestrator::secrets;
 
 /// Execute post-start lifecycle hooks in order.
 ///
-/// Currently only `HookType::Sql` is supported — each hook runs a SQL command
+/// Currently only `HookType::Sql` is supported. Each hook runs a SQL command
 /// inside a running container via `docker compose exec`.
 ///
 /// # Errors

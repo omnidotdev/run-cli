@@ -2,7 +2,7 @@
 "@omnidotdev/run-cli": minor
 ---
 
-Initial release of the Run CLI — self-hosting made simple
+Initial release of the Run CLI: self-hosting made simple
 
 - `run up <product>` deploys a full stack with one command (secrets, TLS, proxy, health checks, OAuth provisioning)
 - `run down <product>` stops a stack, `--fresh` wipes all data

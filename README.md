@@ -1,38 +1,34 @@
-# Run
+<div align="center">
 
-Self-hosting made simple.
+  <h1 align="center">Run</h1>
 
-A CLI for deploying Omni products with one command — automatic SSL, reverse proxy, secrets, and health checks included.
+[Website](https://run.omni.dev) | [Docs](https://docs.omni.dev/grid/run) | [Discord](https://discord.gg/omnidotdev) | [X](https://x.com/omnidotdev)
+
+</div>
+
+**Run** is a CLI for self-hosting Omni products. One command deploys a full stack with automatic SSL, reverse proxy, secrets, and health checks.
 
 ## Installation
 
-### Shell (macOS/Linux)
+| Platform | Channel | Command / Link |
+| --- | --- | --- |
+| All | [GitHub Releases](https://github.com/omnidotdev/run-cli/releases) | Download from releases page |
+| macOS / Linux | Shell | `curl -fsSL https://run.omni.dev/install.sh \| sh` |
+| macOS / Linux | [Homebrew](https://github.com/omnidotdev/homebrew-tap/blob/master/Formula/run-cli.rb) | `brew install omnidotdev/tap/run-cli` |
+| Arch Linux | [AUR](https://aur.archlinux.org/packages/omnidotdev-run-cli) / [AUR (bin)](https://aur.archlinux.org/packages/omnidotdev-run-cli-bin) | `paru -S omnidotdev-run-cli` or `paru -S omnidotdev-run-cli-bin` |
 
-```sh
-curl -fsSL https://run.omni.dev/install.sh | sh
-```
+### Build from source
 
-### Homebrew
-
-```sh
-brew install omnidotdev/tap/run-cli
-```
-
-### AUR (Arch Linux)
-
-```sh
-paru -S omnidotdev-run-cli-bin
-```
-
-### From source
-
-```sh
-cargo install --git https://github.com/omnidotdev/run-cli
+```bash
+git clone https://github.com/omnidotdev/run-cli
+cd run-cli
+cargo build --release
+# Binary will be at target/release/run
 ```
 
 ## Quick Start
 
-```sh
+```bash
 # Deploy Runa
 run up runa
 
@@ -66,4 +62,4 @@ run down runa --fresh
 
 ## License
 
-Apache 2.0 — see [LICENSE.md](LICENSE.md)
+The code in this repository is licensed under Apache 2.0, &copy; [Omni LLC](https://omni.dev). See [LICENSE.md](LICENSE.md) for more information.
