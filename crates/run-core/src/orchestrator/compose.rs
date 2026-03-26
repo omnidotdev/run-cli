@@ -174,8 +174,15 @@ fn write_healthcheck(out: &mut String, svc: &ServiceDef) {
 
     out.push_str("    healthcheck:\n");
 
-    // Format test as a JSON array
-    let test_items: Vec<String> = hc.test.iter().map(|t| format!("\"{t}\"")).collect();
+    // Format test as a YAML flow sequence, escaping inner double quotes
+    let test_items: Vec<String> = hc
+        .test
+        .iter()
+        .map(|t| {
+            let escaped = t.replace('"', r#"\""#);
+            format!("\"{escaped}\"")
+        })
+        .collect();
     let _ = writeln!(out, "      test: [{}]", test_items.join(", "));
 
     if let Some(interval) = &hc.interval {
