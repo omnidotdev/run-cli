@@ -1,0 +1,24 @@
+name = "run"
+version = "0.1.0"
+description = "Self-hosting made simple"
+type = "bin"
+bin = "run"
+
+[commands.up]
+description = "Start a product stack"
+
+[commands.down]
+description = "Stop a product stack"
+
+[commands.ls]
+description = "List available products"
+
+[commands.logs]
+description = "Tail container logs"
+
+[commands.plan]
+description = "Show what would happen without making changes"
+
+[packages]
+aur = "omnidotdev-run-cli-bin"
+homebrew = "omnidotdev/tap/run-cli"
