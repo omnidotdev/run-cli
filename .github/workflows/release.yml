@@ -147,8 +147,8 @@ jobs:
           cd tap
 
           mkdir -p Formula
-          cat > Formula/run.rb <<'FORMULAEOF'
-          class Run < Formula
+          cat > Formula/run-cli.rb <<FORMULAEOF
+          class RunCli < Formula
             desc "Self-hosting made simple"
             homepage "https://run.omni.dev"
             version "${VERSION}"
@@ -185,13 +185,14 @@ jobs:
             end
           end
           FORMULAEOF
-          sed -i "s/\${VERSION}/${VERSION}/g; s/\${MACOS_ARM_SHA256}/${MACOS_ARM_SHA256}/g; s/\${MACOS_X86_SHA256}/${MACOS_X86_SHA256}/g; s/\${LINUX_X86_SHA256}/${LINUX_X86_SHA256}/g; s/\${LINUX_ARM_SHA256}/${LINUX_ARM_SHA256}/g" Formula/run.rb
+          # Dedent the formula (remove leading 10-space indentation)
+          sed -i 's/^          //' Formula/run-cli.rb
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Formula/run.rb
+          git add Formula/run-cli.rb
           if ! git diff --cached --quiet; then
-            git commit -m "chore: update run to v${VERSION}"
+            git commit -m "chore: update run-cli to v${VERSION}"
             git push
           fi
       - name: Publish to AUR
