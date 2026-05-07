@@ -28,7 +28,7 @@ jobs:
         run: bun install
       - name: Create release pull request
         id: changesets
-        uses: changesets/action@v1.4.9
+        uses: changesets/action@v1.8.0
         with:
           version: bun run version && cargo update --workspace && git add Cargo.toml Cargo.lock
           publish: |
