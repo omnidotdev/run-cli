@@ -2,7 +2,7 @@
 
   <h1 align="center">Run</h1>
 
-[Website](https://run.omni.dev) | [Docs](https://docs.omni.dev/products/run) | [Discord](https://discord.gg/omnidotdev) | [X](https://x.com/omnidotdev)
+[Website](https://run.omni.dev) | [Docs](https://docs.omni.dev/products/run) | [Discord](https://discord.gg/omnidotdev) | [X](https://x.com/omnidotdev) | [Threads](https://www.threads.com/@omnidotdev)
 
 </div>
 
