@@ -28,13 +28,13 @@ jobs:
         run: bun install
       - name: Create release pull request
         id: changesets
-        uses: changesets/action@v1.4.9
+        uses: changesets/action@v2
         with:
-          version: bun run version && cargo update --workspace && git add Cargo.toml Cargo.lock
-          publish: |
+          version-script: bun run version && cargo update --workspace && git add Cargo.toml Cargo.lock
+          publish-script: |
             echo "Publishing run-cli@$(jq -r '.version' package.json)"
-          title: "chore(release): version packages"
-          commit: "chore(release): version packages"
+          pr-title: "chore(release): version packages"
+          commit-message: "chore(release): version packages"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Detect version commit
