@@ -23,7 +23,7 @@ toml = "0.9"
 tokio = { version = "1", features = ["rt-multi-thread", "process", "fs", "macros", "time"] }
 rand = "0.9"
 sha2 = "0.10"
-base64 = "0.22"
+base64 = "0.23"
 dirs = "6"
 which = "8"
 tempfile = "3"
