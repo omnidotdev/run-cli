@@ -38,7 +38,7 @@ retries = 5
 
 [[services]]
 name = "auth"
-image = "ghcr.io/omnidotdev/gatekeeper-app:latest"
+image = "api.manifold.omni.dev/omni/gatekeeper@sha256:db91772cf6748a2da2b5a4e513efe9108698ffbf0ad8569d5426c2f8746d51f3"
 depends_on = [{ service = "auth-db", condition = "service_healthy" }]
 
 [services.environment]
@@ -57,7 +57,7 @@ DEFAULT_CLIENT_REDIRECT_URIS = "${BASE_URL}/api/auth/oauth2/callback/omni"
 
 [[services]]
 name = "api"
-image = "ghcr.io/omnidotdev/runa-api:latest"
+image = "api.manifold.omni.dev/omni/runa-api@sha256:a391d361c9e2ea71832ee889cd692abed74774f168dd3ab7257a43822c46485f"
 extra_hosts = ["localhost:host-gateway"]
 depends_on = [{ service = "db", condition = "service_healthy" }]
 
@@ -80,7 +80,7 @@ start_period = "60s"
 
 [[services]]
 name = "app"
-image = "ghcr.io/omnidotdev/runa-app:latest"
+image = "api.manifold.omni.dev/omni/runa-app@sha256:70ba7e881b1da5b1f8a69d47dc1934f2dced3593f70abe75d508a40dc36de447"
 extra_hosts = ["localhost:host-gateway"]
 depends_on = [
   { service = "db", condition = "service_healthy" },
