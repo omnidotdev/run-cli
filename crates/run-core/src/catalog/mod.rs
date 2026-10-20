@@ -20,16 +20,20 @@ pub struct EmbeddedCatalog;
 /// Embedded Runa manifest TOML.
 const RUNA_TOML: &str = include_str!("runa.toml");
 
+/// Embedded Backfeed manifest TOML.
+const BACKFEED_TOML: &str = include_str!("backfeed.toml");
+
 impl Catalog for EmbeddedCatalog {
     fn get(&self, product: &str) -> crate::Result<ProductManifest> {
         match product {
             "runa" => toml::from_str(RUNA_TOML).map_err(|source| crate::Error::ParseManifest { source }),
+            "backfeed" => toml::from_str(BACKFEED_TOML).map_err(|source| crate::Error::ParseManifest { source }),
             _ => Err(crate::Error::ProductNotFound(product.to_owned())),
         }
     }
 
     fn list(&self) -> Vec<String> {
-        vec!["runa".to_owned()]
+        vec!["backfeed".to_owned(), "runa".to_owned()]
     }
 }
 
@@ -59,11 +63,22 @@ mod tests {
     }
 
     #[test]
-    fn list_contains_runa() {
+    fn list_contains_products() {
         let catalog = default_catalog();
         let products = catalog.list();
 
-        assert_eq!(products, vec!["runa"]);
+        assert_eq!(products, vec!["backfeed", "runa"]);
+    }
+
+    #[test]
+    fn backfeed_manifest_parses() {
+        let catalog = default_catalog();
+        let manifest = catalog.get("backfeed").expect("backfeed manifest should parse");
+
+        assert_eq!(manifest.name, "backfeed");
+        assert_eq!(manifest.services.len(), 4);
+        let secrets = manifest.secrets.expect("secrets should be defined");
+        assert_eq!(secrets.auto.len(), 2);
     }
 
     #[test]
