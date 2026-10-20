@@ -1,0 +1,80 @@
+name = "backfeed"
+display_name = "Backfeed"
+description = "Self-hosted Backfeed instance"
+
+# ── Services ──────────────────────────────────────────────────────────
+
+[[services]]
+name = "db"
+# pgvector-enabled Postgres for the feedback brain's embedding/dedupe/clustering;
+# the api migrate step enables the extension. Postgres 18 places data under a
+# versioned subdirectory, so the volume mounts at /var/lib/postgresql, not /data
+image = "pgvector/pgvector:pg18"
+volumes = ["db_data:/var/lib/postgresql"]
+
+[services.environment]
+POSTGRES_DB = "${DB_NAME:-backfeed}"
+POSTGRES_USER = "${DB_USER:-postgres}"
+POSTGRES_PASSWORD = "${DB_PASSWORD}"
+
+[services.healthcheck]
+test = ["CMD-SHELL", "pg_isready -U postgres"]
+interval = "5s"
+timeout = "5s"
+retries = 5
+
+[[services]]
+name = "api"
+image = "api.manifold.omni.dev/omni/backfeed-api@sha256:72ea65dfcf8374aae14d644f04f810bb51f5bc968bcf46969a2e78a275254555"
+extra_hosts = ["localhost:host-gateway"]
+depends_on = [{ service = "db", condition = "service_healthy" }]
+
+[services.environment]
+DATABASE_URL = "postgres://postgres:${DB_PASSWORD}@db:5432/backfeed"
+AUTH_SECRET = "${AUTH_SECRET}"
+PORT = "4000"
+HOST = "0.0.0.0"
+NODE_ENV = "production"
+CORS_ALLOWED_ORIGINS = "${BASE_URL}"
+
+[[services]]
+name = "app"
+image = "api.manifold.omni.dev/omni/backfeed-app@sha256:9ea5e1e3ba17801c5ced17345cbf8f32095c0a5e4b9633cc854124b0ec606f8f"
+extra_hosts = ["localhost:host-gateway"]
+depends_on = [{ service = "api", condition = "service_started" }]
+
+[services.environment]
+NODE_ENV = "production"
+VITE_BASE_URL = "${BASE_URL}"
+VITE_API_BASE_URL = "${API_BASE_URL}"
+AUTH_SECRET = "${AUTH_SECRET}"
+
+[[services]]
+name = "caddy"
+image = "caddy:2-alpine"
+depends_on = [
+  { service = "app", condition = "service_started" },
+  { service = "api", condition = "service_started" },
+]
+
+# ── Secrets ───────────────────────────────────────────────────────────
+
+[secrets]
+auto = [
+  { name = "DB_PASSWORD", method = "hex", length = 32 },
+  { name = "AUTH_SECRET", method = "hex", length = 32 },
+]
+
+# ── TLS ───────────────────────────────────────────────────────────────
+
+[tls]
+provider = "mkcert"
+
+# ── Proxy ─────────────────────────────────────────────────────────────
+
+[proxy]
+provider = "caddy"
+routes = [
+  { name = "app", listen_port = 443, listen_port_http = 80, target = "app:3000" },
+  { name = "api", listen_port = 4000, target = "api:4000" },
+]
