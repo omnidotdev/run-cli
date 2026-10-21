@@ -33,6 +33,9 @@ const UPTIME_KUMA_TOML: &str = include_str!("uptime-kuma.toml");
 /// Embedded Pi-hole manifest TOML (a third-party, non-Omni app).
 const PIHOLE_TOML: &str = include_str!("pihole.toml");
 
+/// Embedded Backfeed manifest TOML.
+const BACKFEED_TOML: &str = include_str!("backfeed.toml");
+
 impl Catalog for EmbeddedCatalog {
     fn get(&self, product: &str) -> crate::Result<ProductManifest> {
         match product {
@@ -40,12 +43,14 @@ impl Catalog for EmbeddedCatalog {
             "vortex" => toml::from_str(VORTEX_TOML).map_err(|source| crate::Error::ParseManifest { source }),
             "uptime-kuma" => toml::from_str(UPTIME_KUMA_TOML).map_err(|source| crate::Error::ParseManifest { source }),
             "pihole" => toml::from_str(PIHOLE_TOML).map_err(|source| crate::Error::ParseManifest { source }),
+            "backfeed" => toml::from_str(BACKFEED_TOML).map_err(|source| crate::Error::ParseManifest { source }),
             _ => Err(crate::Error::ProductNotFound(product.to_owned())),
         }
     }
 
     fn list(&self) -> Vec<String> {
         vec![
+            "backfeed".to_owned(),
             "pihole".to_owned(),
             "runa".to_owned(),
             "uptime-kuma".to_owned(),
@@ -457,7 +462,7 @@ services:
         let catalog = default_catalog();
         let products = catalog.list();
 
-        assert_eq!(products, vec!["pihole", "runa", "uptime-kuma", "vortex"]);
+        assert_eq!(products, vec!["backfeed", "pihole", "runa", "uptime-kuma", "vortex"]);
     }
 
     #[test]
@@ -527,6 +532,17 @@ services:
         let secrets = manifest.secrets.expect("secrets should be defined");
 
         assert_eq!(secrets.auto.len(), 6);
+    }
+
+    #[test]
+    fn backfeed_manifest_parses() {
+        let catalog = default_catalog();
+        let manifest = catalog.get("backfeed").expect("backfeed manifest should parse");
+
+        assert_eq!(manifest.name, "backfeed");
+        assert_eq!(manifest.services.len(), 4);
+        let secrets = manifest.secrets.expect("secrets should be defined");
+        assert_eq!(secrets.auto.len(), 2);
     }
 
     #[test]
