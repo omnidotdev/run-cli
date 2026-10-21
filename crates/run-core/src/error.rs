@@ -19,6 +19,8 @@ pub enum Error {
     ParseManifest { source: toml::de::Error },
     #[error("failed to parse recipe: {source}")]
     ParseYaml { source: serde_yaml::Error },
+    #[error("cannot ingest compose file: {message}")]
+    ComposeIngest { message: String },
     #[error("docker command failed: {message}")]
     Docker { message: String },
     #[error("healthcheck timed out after {seconds}s")]

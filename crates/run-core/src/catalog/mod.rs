@@ -2,6 +2,8 @@ use std::path::Path;
 
 use crate::config::ProductManifest;
 
+mod ingest;
+
 /// Resolve a product manifest by name.
 pub trait Catalog {
     /// Look up a product manifest by name.
@@ -66,15 +68,33 @@ pub fn resolve(target: &str, catalog: &dyn Catalog) -> crate::Result<ProductMani
     let path = Path::new(target);
 
     if path.is_file() {
+        if is_compose_file(path) {
+            return load_compose_file(path);
+        }
+
         return load_recipe_file(path);
     }
 
     if path.is_dir() {
+        // A run recipe in the directory takes priority over a bare compose file
         for candidate in ["run.toml", "run.yaml", "run.yml"] {
             let recipe = path.join(candidate);
 
             if recipe.is_file() {
                 return load_recipe_file(&recipe);
+            }
+        }
+
+        for candidate in [
+            "compose.yaml",
+            "compose.yml",
+            "docker-compose.yaml",
+            "docker-compose.yml",
+        ] {
+            let compose = path.join(candidate);
+
+            if compose.is_file() {
+                return load_compose_file(&compose);
             }
         }
 
@@ -100,6 +120,36 @@ fn load_recipe_file(path: &Path) -> crate::Result<ProductManifest> {
     } else {
         toml::from_str(&contents).map_err(|source| crate::Error::ParseManifest { source })
     }
+}
+
+/// Whether a path is a conventionally-named docker-compose file.
+fn is_compose_file(path: &Path) -> bool {
+    matches!(
+        path.file_name().and_then(|name| name.to_str()),
+        Some("compose.yaml" | "compose.yml" | "docker-compose.yaml" | "docker-compose.yml")
+    )
+}
+
+/// Read a docker-compose file and ingest it into a manifest named after its directory.
+fn load_compose_file(path: &Path) -> crate::Result<ProductManifest> {
+    let contents = std::fs::read_to_string(path).map_err(|source| crate::Error::ReadFile {
+        path: path.to_path_buf(),
+        source,
+    })?;
+
+    ingest::ingest_compose(&contents, &derive_stack_name(path))
+}
+
+/// Derive a stack name from the directory that contains a compose file.
+fn derive_stack_name(compose_path: &Path) -> String {
+    compose_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .and_then(|parent| parent.canonicalize().ok())
+        .as_deref()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        .map_or_else(|| "app".to_owned(), ToOwned::to_owned)
 }
 
 #[cfg(test)]
@@ -207,6 +257,49 @@ services:
 
         let catalog = default_catalog();
         assert!(resolve(dir.path().to_str().expect("utf8 path"), &catalog).is_err());
+    }
+
+    const COMPOSE: &str = "
+services:
+  web:
+    image: nginx:latest
+";
+
+    #[test]
+    fn resolve_compose_file_ingests_services() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("docker-compose.yml");
+        std::fs::write(&path, COMPOSE).expect("write compose");
+
+        let catalog = default_catalog();
+        let manifest = resolve(path.to_str().expect("utf8 path"), &catalog).expect("compose file should resolve");
+
+        assert_eq!(manifest.services.len(), 1);
+        assert_eq!(manifest.services[0].image, "nginx:latest");
+    }
+
+    #[test]
+    fn resolve_directory_with_compose_file_ingests() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("compose.yaml"), COMPOSE).expect("write compose");
+
+        let catalog = default_catalog();
+        let manifest = resolve(dir.path().to_str().expect("utf8 path"), &catalog).expect("dir compose should resolve");
+
+        assert_eq!(manifest.services[0].image, "nginx:latest");
+    }
+
+    #[test]
+    fn resolve_prefers_run_recipe_over_compose_in_same_dir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("run.toml"), MINIMAL_MANIFEST).expect("write recipe");
+        std::fs::write(dir.path().join("compose.yaml"), COMPOSE).expect("write compose");
+
+        let catalog = default_catalog();
+        let manifest = resolve(dir.path().to_str().expect("utf8 path"), &catalog).expect("should resolve");
+
+        // run.toml wins, so the stack is named from the recipe, not ingested from compose
+        assert_eq!(manifest.name, "myapp");
     }
 
     #[test]
