@@ -94,7 +94,8 @@ async fn cmd_up(product: &str) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn cmd_down(product: &str, fresh: bool) -> Result<(), Box<dyn std::error::Error>> {
-    run_core::orchestrator::down(product, fresh).await?;
+    let name = run_core::catalog::project_name(product)?;
+    run_core::orchestrator::down(&name, fresh).await?;
 
     Ok(())
 }
@@ -111,11 +112,12 @@ fn cmd_ls() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn cmd_logs(product: &str, service: Option<&str>, follow: bool) -> Result<(), Box<dyn std::error::Error>> {
-    let dirs = ProjectDirs::new(product);
+    let name = run_core::catalog::project_name(product)?;
+    let dirs = ProjectDirs::new(&name);
     let env_file = dirs.env_file();
 
     if !secrets::env_file_exists(&env_file) {
-        return Err(run_core::Error::ProjectNotInitialized(product.to_owned()).into());
+        return Err(run_core::Error::ProjectNotInitialized(name).into());
     }
 
     run_core::docker::compose_logs(dirs.root(), &env_file, service, follow).await?;

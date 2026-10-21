@@ -65,14 +65,23 @@ pub fn default_catalog() -> impl Catalog {
 /// `Error::ParseManifest` if it does not parse, or `Error::ProductNotFound`
 /// when nothing matches.
 pub fn resolve(target: &str, catalog: &dyn Catalog) -> crate::Result<ProductManifest> {
+    resolve_path(target).unwrap_or_else(|| catalog.get(target))
+}
+
+/// Resolve a filesystem target to a manifest, or `None` if it is not a path.
+///
+/// A file loads as a recipe, or is ingested when it is a compose file; a
+/// directory loads a `run.{toml,yaml,yml}` recipe, else a compose file inside
+/// it. A directory with neither resolves to `Some(Err(ProductNotFound))`.
+fn resolve_path(target: &str) -> Option<crate::Result<ProductManifest>> {
     let path = Path::new(target);
 
     if path.is_file() {
-        if is_compose_file(path) {
-            return load_compose_file(path);
-        }
-
-        return load_recipe_file(path);
+        return Some(if is_compose_file(path) {
+            load_compose_file(path)
+        } else {
+            load_recipe_file(path)
+        });
     }
 
     if path.is_dir() {
@@ -81,7 +90,7 @@ pub fn resolve(target: &str, catalog: &dyn Catalog) -> crate::Result<ProductMani
             let recipe = path.join(candidate);
 
             if recipe.is_file() {
-                return load_recipe_file(&recipe);
+                return Some(load_recipe_file(&recipe));
             }
         }
 
@@ -94,14 +103,27 @@ pub fn resolve(target: &str, catalog: &dyn Catalog) -> crate::Result<ProductMani
             let compose = path.join(candidate);
 
             if compose.is_file() {
-                return load_compose_file(&compose);
+                return Some(load_compose_file(&compose));
             }
         }
 
-        return Err(crate::Error::ProductNotFound(target.to_owned()));
+        return Some(Err(crate::Error::ProductNotFound(target.to_owned())));
     }
 
-    catalog.get(target)
+    None
+}
+
+/// Return the project name for a target.
+///
+/// A path target resolves to its manifest's name; a bare name is returned
+/// verbatim, so `run down <name>` and `run logs <name>` work for both catalog
+/// and bring-your-own apps without re-reading the catalog.
+///
+/// # Errors
+///
+/// Returns an error if a path target cannot be resolved to a manifest.
+pub fn project_name(target: &str) -> crate::Result<String> {
+    resolve_path(target).map_or_else(|| Ok(target.to_owned()), |result| result.map(|manifest| manifest.name))
 }
 
 /// Read and parse a recipe file from disk, picking the parser by extension.
@@ -249,6 +271,47 @@ services:
             resolve("nonexistent", &catalog),
             Err(crate::Error::ProductNotFound(_))
         ));
+    }
+
+    #[test]
+    fn project_name_passes_bare_names_through() {
+        // a catalog name and an unknown name both return verbatim, so `run down
+        // <name>` tears down both catalog and bring-your-own apps
+        assert_eq!(project_name("runa").expect("bare name"), "runa");
+        assert_eq!(project_name("some-byo-app").expect("bare name"), "some-byo-app");
+    }
+
+    #[test]
+    fn project_name_resolves_a_recipe_file_to_its_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("app.toml");
+        std::fs::write(&path, MINIMAL_MANIFEST).expect("write recipe");
+
+        assert_eq!(
+            project_name(path.to_str().expect("utf8 path")).expect("resolve"),
+            "myapp"
+        );
+    }
+
+    #[test]
+    fn project_name_resolves_a_compose_directory_to_its_dir_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("compose.yaml"), COMPOSE).expect("write compose");
+
+        let expected = dir
+            .path()
+            .canonicalize()
+            .expect("canonicalize")
+            .file_name()
+            .expect("file name")
+            .to_str()
+            .expect("utf8")
+            .to_owned();
+
+        assert_eq!(
+            project_name(dir.path().to_str().expect("utf8 path")).expect("resolve"),
+            expected
+        );
     }
 
     #[test]
