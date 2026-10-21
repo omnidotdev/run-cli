@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::config::ProductManifest;
+use crate::config::{ProductManifest, ServiceDef};
 
 mod ingest;
 
@@ -65,7 +65,13 @@ pub fn default_catalog() -> impl Catalog {
 /// `Error::ParseManifest` if it does not parse, or `Error::ProductNotFound`
 /// when nothing matches.
 pub fn resolve(target: &str, catalog: &dyn Catalog) -> crate::Result<ProductManifest> {
-    resolve_path(target).unwrap_or_else(|| catalog.get(target))
+    resolve_path(target).unwrap_or_else(|| {
+        catalog.get(target).or_else(|error| match error {
+            // a name that is not a path and not in the catalog is a bare image
+            crate::Error::ProductNotFound(_) => Ok(synthesize_image(target)),
+            other => Err(other),
+        })
+    })
 }
 
 /// Resolve a filesystem target to a manifest, or `None` if it is not a path.
@@ -174,6 +180,49 @@ fn derive_stack_name(compose_path: &Path) -> String {
         .map_or_else(|| "app".to_owned(), ToOwned::to_owned)
 }
 
+/// Synthesize a single-service recipe from a bare image reference.
+///
+/// This is the final step of the cascade, so `run up nginx` or
+/// `run up ghcr.io/acme/app:1.2` just works. The stack is named for the image
+/// basename; TLS, proxy, and port mapping are left to a recipe when the user
+/// wants them.
+fn synthesize_image(reference: &str) -> ProductManifest {
+    let name = image_basename(reference);
+
+    ProductManifest {
+        name: name.clone(),
+        display_name: None,
+        description: None,
+        services: vec![ServiceDef {
+            name,
+            image: reference.to_owned(),
+            ports: None,
+            command: None,
+            environment: None,
+            volumes: None,
+            depends_on: None,
+            extra_hosts: None,
+            cap_add: None,
+            security_opt: None,
+            ulimits: None,
+            healthcheck: None,
+        }],
+        secrets: None,
+        tls: None,
+        proxy: None,
+        hooks: None,
+    }
+}
+
+/// Extract an image's basename, dropping any registry, tag, and digest.
+fn image_basename(reference: &str) -> String {
+    let without_digest = reference.split('@').next().unwrap_or(reference);
+    let last_segment = without_digest.rsplit('/').next().unwrap_or(without_digest);
+    let bare = last_segment.split(':').next().unwrap_or(last_segment);
+
+    bare.to_ascii_lowercase()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -265,12 +314,31 @@ services:
     }
 
     #[test]
-    fn resolve_unknown_name_returns_not_found() {
+    fn resolve_bare_image_name_synthesizes_a_service() {
         let catalog = default_catalog();
-        assert!(matches!(
-            resolve("nonexistent", &catalog),
-            Err(crate::Error::ProductNotFound(_))
-        ));
+        let manifest = resolve("nginx", &catalog).expect("bare image should synthesize");
+
+        assert_eq!(manifest.services.len(), 1);
+        assert_eq!(manifest.services[0].image, "nginx");
+    }
+
+    #[test]
+    fn synthesized_stack_is_named_for_the_image_basename() {
+        let catalog = default_catalog();
+        let manifest = resolve("ghcr.io/acme/widget:1.2", &catalog).expect("bare image should synthesize");
+
+        assert_eq!(manifest.name, "widget");
+        assert_eq!(manifest.services[0].name, "widget");
+        assert_eq!(manifest.services[0].image, "ghcr.io/acme/widget:1.2");
+    }
+
+    #[test]
+    fn resolve_catalog_name_is_not_treated_as_an_image() {
+        let catalog = default_catalog();
+        let manifest = resolve("runa", &catalog).expect("catalog name resolves");
+
+        // runa has a full stack, not a single synthesized service
+        assert!(manifest.services.len() > 1);
     }
 
     #[test]
