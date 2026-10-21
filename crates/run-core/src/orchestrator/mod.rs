@@ -25,7 +25,9 @@ use crate::docker;
 #[allow(clippy::future_not_send)] // Catalog is only used synchronously before any awaits
 pub async fn up(product: &str, catalog: &dyn Catalog) -> crate::Result<()> {
     // Resolve manifest before any awaits so the non-Send catalog ref is dropped
-    let manifest = catalog.get(product)?;
+    let manifest = crate::catalog::resolve(product, catalog)?;
+    // A path target resolves to a recipe whose own name keys the project dirs
+    let product = manifest.name.as_str();
 
     docker::check_docker().await?;
     let dirs = ProjectDirs::new(product);
@@ -155,14 +157,15 @@ pub async fn down(product: &str, fresh: bool) -> crate::Result<()> {
 ///
 /// # Errors
 ///
-/// Returns `Error::ProductNotFound` if the product is not in the catalog.
+/// Returns an error if the target cannot be resolved to a manifest: not in the
+/// catalog, or an unreadable or invalid local recipe.
 pub fn plan(product: &str, catalog: &dyn Catalog) -> crate::Result<String> {
-    let manifest = catalog.get(product)?;
+    let manifest = crate::catalog::resolve(product, catalog)?;
     let display = manifest.display_name.as_deref().unwrap_or(&manifest.name);
 
     let mut out = String::new();
 
-    let _ = writeln!(out, "Product: {display} ({product})");
+    let _ = writeln!(out, "Product: {display} ({})", manifest.name);
 
     if let Some(desc) = &manifest.description {
         let _ = writeln!(out, "  {desc}");
@@ -307,4 +310,37 @@ fn write_file(path: &Path, content: &str) -> crate::Result<()> {
         path: path.to_owned(),
         source,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::catalog::default_catalog;
+
+    const MINIMAL_MANIFEST: &str = r#"
+name = "myapp"
+
+[[services]]
+name = "web"
+image = "nginx:latest"
+"#;
+
+    #[test]
+    fn plan_resolves_a_local_recipe_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("custom.toml");
+        std::fs::write(&path, MINIMAL_MANIFEST).expect("write manifest");
+
+        let catalog = default_catalog();
+        let output = plan(path.to_str().expect("utf8 path"), &catalog).expect("plan should resolve the recipe");
+
+        assert!(
+            output.contains("myapp"),
+            "plan output should name the recipe, got:\n{output}"
+        );
+        assert!(
+            output.contains("web (nginx:latest)"),
+            "plan output should list the service, got:\n{output}"
+        );
+    }
 }

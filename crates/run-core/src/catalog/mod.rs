@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use crate::config::ProductManifest;
 
 /// Resolve a product manifest by name.
@@ -47,6 +49,49 @@ pub fn default_catalog() -> impl Catalog {
     EmbeddedCatalog
 }
 
+/// Resolve a target into a product manifest.
+///
+/// A target that names an existing file on disk is loaded as a recipe, and a
+/// target naming a directory loads `run.toml` from inside it. Anything else is
+/// looked up by name in the embedded catalog. This is the entry point for the
+/// resolver cascade: bring-your-own sources (compose, git, bare image) hang off
+/// the same function as they land.
+///
+/// # Errors
+///
+/// Returns `Error::ReadFile` if a resolved path cannot be read,
+/// `Error::ParseManifest` if it does not parse, or `Error::ProductNotFound`
+/// when nothing matches.
+pub fn resolve(target: &str, catalog: &dyn Catalog) -> crate::Result<ProductManifest> {
+    let path = Path::new(target);
+
+    if path.is_file() {
+        return load_recipe_file(path);
+    }
+
+    if path.is_dir() {
+        let recipe = path.join("run.toml");
+
+        if recipe.is_file() {
+            return load_recipe_file(&recipe);
+        }
+
+        return Err(crate::Error::ProductNotFound(target.to_owned()));
+    }
+
+    catalog.get(target)
+}
+
+/// Read and parse a TOML recipe file from disk.
+fn load_recipe_file(path: &Path) -> crate::Result<ProductManifest> {
+    let contents = std::fs::read_to_string(path).map_err(|source| crate::Error::ReadFile {
+        path: path.to_path_buf(),
+        source,
+    })?;
+
+    toml::from_str(&contents).map_err(|source| crate::Error::ParseManifest { source })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -64,6 +109,63 @@ mod tests {
     fn unknown_product_returns_error() {
         let catalog = default_catalog();
         assert!(catalog.get("nonexistent").is_err());
+    }
+
+    const MINIMAL_MANIFEST: &str = r#"
+name = "myapp"
+
+[[services]]
+name = "web"
+image = "nginx:latest"
+"#;
+
+    #[test]
+    fn resolve_embedded_name_returns_manifest() {
+        let catalog = default_catalog();
+        let manifest = resolve("runa", &catalog).expect("embedded name should resolve");
+
+        assert_eq!(manifest.name, "runa");
+    }
+
+    #[test]
+    fn resolve_local_recipe_file_returns_manifest() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("custom.toml");
+        std::fs::write(&path, MINIMAL_MANIFEST).expect("write manifest");
+
+        let catalog = default_catalog();
+        let manifest = resolve(path.to_str().expect("utf8 path"), &catalog).expect("local file should resolve");
+
+        assert_eq!(manifest.name, "myapp");
+        assert_eq!(manifest.services.len(), 1);
+    }
+
+    #[test]
+    fn resolve_directory_with_run_toml_returns_manifest() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("run.toml"), MINIMAL_MANIFEST).expect("write manifest");
+
+        let catalog = default_catalog();
+        let manifest = resolve(dir.path().to_str().expect("utf8 path"), &catalog).expect("directory should resolve");
+
+        assert_eq!(manifest.name, "myapp");
+    }
+
+    #[test]
+    fn resolve_unknown_name_returns_not_found() {
+        let catalog = default_catalog();
+        assert!(matches!(
+            resolve("nonexistent", &catalog),
+            Err(crate::Error::ProductNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn resolve_directory_without_run_toml_returns_not_found() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let catalog = default_catalog();
+        assert!(resolve(dir.path().to_str().expect("utf8 path"), &catalog).is_err());
     }
 
     #[test]
