@@ -1,0 +1,147 @@
+use std::path::Path;
+
+use crate::docker;
+
+/// Poll `docker compose ps` until all services are healthy or timeout expires.
+///
+/// Checks every 3 seconds. Prints a `.` to stderr on each poll and a newline
+/// when finished.
+///
+/// # Errors
+///
+/// Returns `Error::HealthTimeout` if `timeout_secs` elapses before all services
+/// report healthy.
+pub async fn wait_for_healthy(project_dir: &Path, env_file: &Path, timeout_secs: u64) -> crate::Result<()> {
+    let start = std::time::Instant::now();
+    let timeout = std::time::Duration::from_secs(timeout_secs);
+    let poll_interval = std::time::Duration::from_secs(3);
+
+    loop {
+        if start.elapsed() >= timeout {
+            eprintln!();
+
+            return Err(crate::Error::HealthTimeout { seconds: timeout_secs });
+        }
+
+        tokio::time::sleep(poll_interval).await;
+        eprint!(".");
+
+        let Ok(output) = docker::compose_ps(project_dir, env_file).await else {
+            // Compose not ready yet, keep polling
+            continue;
+        };
+
+        if all_healthy(&output) {
+            eprintln!();
+
+            return Ok(());
+        }
+    }
+}
+
+/// Check whether all services with healthchecks are showing "healthy".
+///
+/// Docker compose ps JSON output may be a single JSON array or one JSON object
+/// per line depending on the version. We handle both formats.
+fn all_healthy(output: &str) -> bool {
+    let trimmed = output.trim();
+
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    // Try parsing as a JSON array first
+    if let Ok(services) = serde_json::from_str::<Vec<serde_json::Value>>(trimmed) {
+        return check_services(&services);
+    }
+
+    // Fall back to newline-delimited JSON objects
+    let services: Vec<serde_json::Value> = trimmed
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+
+    if services.is_empty() {
+        return false;
+    }
+
+    check_services(&services)
+}
+
+/// Decide whether every service is up: running, and either healthy or without a
+/// healthcheck. A container reporting "starting" or "unhealthy", or any non-running
+/// state (exited, restarting), means the stack is not ready yet.
+fn check_services(services: &[serde_json::Value]) -> bool {
+    if services.is_empty() {
+        return false;
+    }
+
+    for svc in services {
+        let state = svc
+            .get("State")
+            .or_else(|| svc.get("state"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let health = svc
+            .get("Health")
+            .or_else(|| svc.get("health"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+
+        // Must be running (an empty state field is tolerated for older formats)
+        if !state.is_empty() && state != "running" {
+            return false;
+        }
+
+        // Either no healthcheck ("") or an affirmative "healthy"; "starting" and
+        // "unhealthy" are both not-yet-ready
+        if !health.is_empty() && health != "healthy" {
+            return false;
+        }
+    }
+
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::check_services;
+
+    fn svc(state: &str, health: &str) -> serde_json::Value {
+        serde_json::json!({ "Service": "web", "State": state, "Health": health })
+    }
+
+    #[test]
+    fn all_healthy_passes() {
+        assert!(check_services(&[svc("running", "healthy"), svc("running", "healthy")]));
+    }
+
+    #[test]
+    fn unhealthy_fails() {
+        assert!(!check_services(&[
+            svc("running", "healthy"),
+            svc("running", "unhealthy")
+        ]));
+    }
+
+    #[test]
+    fn starting_fails() {
+        assert!(!check_services(&[svc("running", "starting")]));
+    }
+
+    #[test]
+    fn no_healthcheck_running_passes() {
+        // A container with no healthcheck reports an empty Health field
+        assert!(check_services(&[svc("running", "")]));
+    }
+
+    #[test]
+    fn exited_fails() {
+        assert!(!check_services(&[svc("exited", "")]));
+    }
+
+    #[test]
+    fn empty_list_fails() {
+        assert!(!check_services(&[]));
+    }
+}

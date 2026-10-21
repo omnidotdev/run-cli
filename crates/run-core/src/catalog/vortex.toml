@@ -1,0 +1,222 @@
+name = "vortex"
+display_name = "Vortex"
+description = "Self-hosted Vortex instance"
+
+# ── Services ──────────────────────────────────────────────────────────
+
+[[services]]
+name = "db"
+image = "postgres:18-alpine"
+# postgres:18 moved its data dir under /var/lib/postgresql/<version>; mounting a
+# volume at /var/lib/postgresql/data makes the entrypoint exit 1, so mount the
+# parent directory instead
+volumes = ["db_data:/var/lib/postgresql"]
+
+[services.environment]
+POSTGRES_DB = "${DB_NAME:-vortex}"
+POSTGRES_USER = "${DB_USER:-postgres}"
+POSTGRES_PASSWORD = "${DB_PASSWORD}"
+
+[services.healthcheck]
+test = ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres}"]
+interval = "5s"
+timeout = "5s"
+retries = 5
+
+[[services]]
+name = "cache"
+image = "docker.io/valkey/valkey:8-alpine"
+command = ["valkey-server", "--requirepass", "${CACHE_PASSWORD}"]
+volumes = ["cache_data:/data"]
+
+[services.healthcheck]
+test = ["CMD-SHELL", "REDISCLI_AUTH=${CACHE_PASSWORD} valkey-cli ping"]
+interval = "5s"
+timeout = "5s"
+retries = 5
+
+[[services]]
+name = "events"
+image = "apache/iggy:0.7.0"
+# The Iggy broker pins threads and locks memory, so it needs SYS_NICE, an
+# unconfined seccomp profile, and unlimited memlock or it crashes on boot
+cap_add = ["SYS_NICE"]
+security_opt = ["seccomp:unconfined"]
+volumes = ["events_data:/local_data"]
+
+[services.ulimits.memlock]
+soft = -1
+hard = -1
+
+[services.environment]
+IGGY_ROOT_USERNAME = "${IGGY_USERNAME:-iggy}"
+IGGY_ROOT_PASSWORD = "${IGGY_PASSWORD}"
+IGGY_TCP_ADDRESS = "0.0.0.0:8090"
+IGGY_HTTP_ADDRESS = "0.0.0.0:3000"
+IGGY_HTTP_ENABLED = "true"
+
+# The image ships bash but its /bin/sh is dash, so probe the TCP port with bash
+# (/dev/tcp is a bash builtin) rather than sh
+[services.healthcheck]
+test = ["CMD", "bash", "-c", "echo -n > /dev/tcp/localhost/8090"]
+interval = "5s"
+timeout = "5s"
+retries = 5
+start_period = "5s"
+
+[[services]]
+name = "api"
+image = "api.manifold.omni.dev/omni/vortex-api@sha256:e2bbd7248ad238ed2b861f22f5a90d15b7471a7c032cc4656a53431c1a686fa9"
+extra_hosts = ["localhost:host-gateway"]
+depends_on = [
+  { service = "db", condition = "service_healthy" },
+  { service = "cache", condition = "service_healthy" },
+  { service = "events", condition = "service_healthy" },
+]
+
+[services.environment]
+DATABASE_URL = "postgres://${DB_USER:-postgres}:${DB_PASSWORD}@db:5432/${DB_NAME:-vortex}"
+CACHE_URL = "redis://default:${CACHE_PASSWORD}@cache:6379"
+EVENTS_URL = "iggy://events:8090"
+IGGY_USERNAME = "${IGGY_USERNAME:-iggy}"
+IGGY_PASSWORD = "${IGGY_PASSWORD}"
+# Server-side identity provider (Gatekeeper/OIDC) for JWKS + userinfo. No
+# identity provider is bundled; point this at a reachable Gatekeeper to enable
+# authenticated requests
+AUTH_BASE_URL = "${AUTH_BASE_URL}"
+# Authorization PDP (Warden). Mandatory in production: authorize() fails closed
+# on a missing URL. Not bundled here, so point this at a reachable Warden to
+# enable authorized requests
+AUTHZ_API_URL = "${AUTHZ_API_URL:-http://localhost:9999}"
+# Non-functional placeholder token: a well-formed JWT carrying a `sub` claim so
+# the Hatchet SDK parses it at boot without throwing. It connects to no Hatchet
+# instance; replace it with a real client token to execute workflows
+HATCHET_CLIENT_TOKEN = "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzdWIiOiJ2b3J0ZXgtc2VsZmhvc3QiLCJncnBjX2Jyb2FkY2FzdF9hZGRyZXNzIjoibG9jYWxob3N0OjcwNzciLCJzZXJ2ZXJfdXJsIjoiaHR0cDovL2xvY2FsaG9zdDo3MDc3In0.placeholder"
+HATCHET_CLIENT_TLS_STRATEGY = "none"
+ENCRYPTION_KEY = "${ENCRYPTION_KEY}"
+INTERNAL_API_SECRET = "${INTERNAL_API_SECRET}"
+PORT = "4000"
+HOST = "0.0.0.0"
+NODE_ENV = "production"
+NODE_TLS_REJECT_UNAUTHORIZED = "0"
+CORS_ALLOWED_ORIGINS = "${BASE_URL}"
+WORKER_URL = "http://worker:8080"
+PLATFORM_ORG_ID = "${PLATFORM_ORG_ID:-}"
+
+[services.healthcheck]
+test = [
+  "CMD",
+  "bun",
+  "-e",
+  "fetch('http://localhost:4000/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
+]
+interval = "10s"
+timeout = "5s"
+retries = 12
+start_period = "60s"
+
+[[services]]
+name = "app"
+image = "api.manifold.omni.dev/omni/vortex-app@sha256:e7a75710fd0b6e3ffdabb8e0b9b3eee57d2bb7e98ec62e00814ee164cf1217c1"
+extra_hosts = ["localhost:host-gateway"]
+depends_on = [
+  { service = "api", condition = "service_healthy" },
+  { service = "cache", condition = "service_healthy" },
+]
+
+[services.environment]
+NODE_ENV = "production"
+NODE_TLS_REJECT_UNAUTHORIZED = "0"
+VITE_BASE_URL = "${BASE_URL}"
+VITE_API_BASE_URL = "${API_BASE_URL}"
+API_INTERNAL_URL = "http://api:4000"
+AUTH_SECRET = "${AUTH_SECRET}"
+CACHE_URL = "redis://default:${CACHE_PASSWORD}@cache:6379"
+
+# The app runtime is node:22-alpine (no bun), so probe with node fetch
+[services.healthcheck]
+test = [
+  "CMD",
+  "node",
+  "-e",
+  "fetch('http://localhost:3000/api/_health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
+]
+interval = "10s"
+timeout = "5s"
+retries = 6
+start_period = "30s"
+
+[[services]]
+name = "worker"
+image = "api.manifold.omni.dev/omni/vortex-worker@sha256:528bbfdb52cb033c7c7cc33883f56deec3a1555b00568ba3795b560ec93e98f3"
+depends_on = [
+  { service = "db", condition = "service_healthy" },
+  { service = "cache", condition = "service_healthy" },
+  { service = "events", condition = "service_healthy" },
+  { service = "api", condition = "service_healthy" },
+]
+
+[services.environment]
+NODE_ENV = "production"
+DATABASE_URL = "postgres://${DB_USER:-postgres}:${DB_PASSWORD}@db:5432/${DB_NAME:-vortex}"
+CACHE_URL = "redis://default:${CACHE_PASSWORD}@cache:6379"
+EVENTS_URL = "iggy://events:8090"
+# Non-functional placeholder token: a well-formed JWT carrying a `sub` claim so
+# the Hatchet SDK parses it at boot without throwing. It connects to no Hatchet
+# instance; replace it with a real client token to execute workflows
+HATCHET_CLIENT_TOKEN = "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzdWIiOiJ2b3J0ZXgtc2VsZmhvc3QiLCJncnBjX2Jyb2FkY2FzdF9hZGRyZXNzIjoibG9jYWxob3N0OjcwNzciLCJzZXJ2ZXJfdXJsIjoiaHR0cDovL2xvY2FsaG9zdDo3MDc3In0.placeholder"
+HATCHET_CLIENT_TLS_STRATEGY = "none"
+ENCRYPTION_KEY = "${ENCRYPTION_KEY}"
+HEALTH_PORT = "8080"
+INTERNAL_API_SECRET = "${INTERNAL_API_SECRET}"
+VORTEX_API_URL = "http://api:4000"
+VORTEX_PUBLIC_URL = "${API_BASE_URL}"
+VORTEX_CALLBACK_BASE_URL = "${BASE_URL}"
+IGGY_USERNAME = "${IGGY_USERNAME:-iggy}"
+IGGY_PASSWORD = "${IGGY_PASSWORD}"
+
+[services.healthcheck]
+test = [
+  "CMD",
+  "bun",
+  "-e",
+  "fetch('http://localhost:8080/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
+]
+interval = "10s"
+timeout = "5s"
+retries = 6
+start_period = "30s"
+
+[[services]]
+name = "caddy"
+image = "caddy:2-alpine"
+depends_on = [
+  { service = "app", condition = "service_started" },
+  { service = "api", condition = "service_started" },
+]
+
+# ── Secrets ───────────────────────────────────────────────────────────
+
+[secrets]
+auto = [
+  { name = "DB_PASSWORD", method = "hex", length = 32 },
+  { name = "CACHE_PASSWORD", method = "hex", length = 32 },
+  { name = "IGGY_PASSWORD", method = "hex", length = 32 },
+  { name = "AUTH_SECRET", method = "hex", length = 32 },
+  { name = "ENCRYPTION_KEY", method = "hex", length = 32 },
+  { name = "INTERNAL_API_SECRET", method = "hex", length = 32 },
+]
+
+# ── TLS ───────────────────────────────────────────────────────────────
+
+[tls]
+provider = "mkcert"
+
+# ── Proxy ─────────────────────────────────────────────────────────────
+
+[proxy]
+provider = "caddy"
+routes = [
+  { name = "app", listen_port = 443, listen_port_http = 80, target = "app:3000" },
+  { name = "api", listen_port = 4000, target = "api:4000" },
+]

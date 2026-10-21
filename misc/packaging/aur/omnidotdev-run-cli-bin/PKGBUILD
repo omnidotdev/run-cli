@@ -1,0 +1,20 @@
+# Maintainer: Omni <team@omni.dev>
+pkgname=omnidotdev-run-cli-bin
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Self-hosting made simple (pre-built)"
+arch=('x86_64')
+url="https://run.omni.dev"
+license=('Apache-2.0')
+depends=()
+provides=('omnidotdev-run-cli')
+conflicts=('omnidotdev-run-cli')
+source=("$pkgname-$pkgver.tar.gz::https://github.com/omnidotdev/run-cli/releases/download/v$pkgver/run-x86_64-unknown-linux-gnu.tar.gz"
+        "$pkgname-$pkgver-LICENSE::https://raw.githubusercontent.com/omnidotdev/run-cli/v$pkgver/LICENSE.md")
+sha256sums=('SKIP'
+            'SKIP')
+
+package() {
+  install -Dm755 "run" "$pkgdir/usr/bin/run"
+  install -Dm644 "$pkgname-$pkgver-LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
