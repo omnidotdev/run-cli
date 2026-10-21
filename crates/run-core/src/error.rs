@@ -17,6 +17,8 @@ pub enum Error {
     WriteFile { path: PathBuf, source: std::io::Error },
     #[error("failed to parse manifest: {source}")]
     ParseManifest { source: toml::de::Error },
+    #[error("failed to parse recipe: {source}")]
+    ParseYaml { source: serde_yaml::Error },
     #[error("docker command failed: {message}")]
     Docker { message: String },
     #[error("healthcheck timed out after {seconds}s")]

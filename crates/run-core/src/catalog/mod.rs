@@ -70,10 +70,12 @@ pub fn resolve(target: &str, catalog: &dyn Catalog) -> crate::Result<ProductMani
     }
 
     if path.is_dir() {
-        let recipe = path.join("run.toml");
+        for candidate in ["run.toml", "run.yaml", "run.yml"] {
+            let recipe = path.join(candidate);
 
-        if recipe.is_file() {
-            return load_recipe_file(&recipe);
+            if recipe.is_file() {
+                return load_recipe_file(&recipe);
+            }
         }
 
         return Err(crate::Error::ProductNotFound(target.to_owned()));
@@ -82,14 +84,22 @@ pub fn resolve(target: &str, catalog: &dyn Catalog) -> crate::Result<ProductMani
     catalog.get(target)
 }
 
-/// Read and parse a TOML recipe file from disk.
+/// Read and parse a recipe file from disk, picking the parser by extension.
+///
+/// `.yaml`/`.yml` files parse as YAML; anything else parses as TOML.
 fn load_recipe_file(path: &Path) -> crate::Result<ProductManifest> {
     let contents = std::fs::read_to_string(path).map_err(|source| crate::Error::ReadFile {
         path: path.to_path_buf(),
         source,
     })?;
 
-    toml::from_str(&contents).map_err(|source| crate::Error::ParseManifest { source })
+    let is_yaml = matches!(path.extension().and_then(|ext| ext.to_str()), Some("yaml" | "yml"));
+
+    if is_yaml {
+        serde_yaml::from_str(&contents).map_err(|source| crate::Error::ParseYaml { source })
+    } else {
+        toml::from_str(&contents).map_err(|source| crate::Error::ParseManifest { source })
+    }
 }
 
 #[cfg(test)]
@@ -118,6 +128,37 @@ name = "myapp"
 name = "web"
 image = "nginx:latest"
 "#;
+
+    const MINIMAL_MANIFEST_YAML: &str = "
+name: myapp
+services:
+  - name: web
+    image: nginx:latest
+";
+
+    #[test]
+    fn resolve_local_yaml_recipe_returns_manifest() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("custom.yaml");
+        std::fs::write(&path, MINIMAL_MANIFEST_YAML).expect("write manifest");
+
+        let catalog = default_catalog();
+        let manifest = resolve(path.to_str().expect("utf8 path"), &catalog).expect("yaml recipe should resolve");
+
+        assert_eq!(manifest.name, "myapp");
+        assert_eq!(manifest.services.len(), 1);
+    }
+
+    #[test]
+    fn resolve_directory_with_run_yaml_returns_manifest() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("run.yaml"), MINIMAL_MANIFEST_YAML).expect("write manifest");
+
+        let catalog = default_catalog();
+        let manifest = resolve(dir.path().to_str().expect("utf8 path"), &catalog).expect("dir run.yaml should resolve");
+
+        assert_eq!(manifest.name, "myapp");
+    }
 
     #[test]
     fn resolve_embedded_name_returns_manifest() {
