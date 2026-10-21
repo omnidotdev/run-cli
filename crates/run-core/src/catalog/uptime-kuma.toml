@@ -1,0 +1,19 @@
+name = "uptime-kuma"
+display_name = "Uptime Kuma"
+description = "Self-hosted uptime monitor and status page"
+
+# A third-party (non-Omni) app, proving run is a universal self-hosting tool:
+# a single upstream image, one port, one volume, no Omni services involved.
+
+[[services]]
+name = "app"
+image = "louislam/uptime-kuma:1"
+ports = ["3001:3001"]
+volumes = ["uptime_kuma_data:/app/data"]
+
+[services.healthcheck]
+test = ["CMD-SHELL", "node extra/healthcheck.js"]
+interval = "10s"
+timeout = "5s"
+retries = 5
+start_period = "30s"

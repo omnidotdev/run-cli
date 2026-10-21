@@ -25,11 +25,26 @@ pub struct ServiceDef {
     pub name: String,
     pub image: String,
     pub ports: Option<Vec<String>>,
+    /// Override the image entrypoint command, emitted as a YAML flow sequence.
+    pub command: Option<Vec<String>>,
     pub environment: Option<BTreeMap<String, String>>,
     pub volumes: Option<Vec<String>>,
     pub depends_on: Option<Vec<DependsOn>>,
     pub extra_hosts: Option<Vec<String>>,
+    /// Linux capabilities to add (e.g. `SYS_NICE` for the Iggy broker).
+    pub cap_add: Option<Vec<String>>,
+    /// Container security options (e.g. `seccomp:unconfined`).
+    pub security_opt: Option<Vec<String>>,
+    /// Resource ulimits keyed by limit name (e.g. `memlock`).
+    pub ulimits: Option<BTreeMap<String, Ulimit>>,
     pub healthcheck: Option<HealthcheckDef>,
+}
+
+/// A single ulimit's soft and hard bounds. A value of `-1` means unlimited.
+#[derive(Debug, Deserialize, Serialize)]
+pub struct Ulimit {
+    pub soft: i64,
+    pub hard: i64,
 }
 
 /// Service dependency with optional readiness condition.
@@ -136,6 +151,64 @@ image = "nginx:latest"
         assert!(manifest.secrets.is_none());
         assert!(manifest.proxy.is_none());
         assert!(manifest.hooks.is_none());
+    }
+
+    #[test]
+    fn deserialize_service_capabilities() {
+        let toml_str = r#"
+name = "caps"
+
+[[services]]
+name = "broker"
+image = "apache/iggy:0.7.0"
+command = ["server", "--flag"]
+cap_add = ["SYS_NICE"]
+security_opt = ["seccomp:unconfined"]
+
+[services.ulimits.memlock]
+soft = -1
+hard = -1
+"#;
+
+        let manifest: ProductManifest = toml::from_str(toml_str).expect("caps manifest should parse");
+        let svc = &manifest.services[0];
+
+        assert_eq!(
+            svc.command.as_deref(),
+            Some(&["server".to_owned(), "--flag".to_owned()][..])
+        );
+        assert_eq!(svc.cap_add.as_deref(), Some(&["SYS_NICE".to_owned()][..]));
+        assert_eq!(
+            svc.security_opt.as_deref(),
+            Some(&["seccomp:unconfined".to_owned()][..])
+        );
+
+        let memlock = svc
+            .ulimits
+            .as_ref()
+            .and_then(|u| u.get("memlock"))
+            .expect("memlock ulimit should parse");
+        assert_eq!(memlock.soft, -1);
+        assert_eq!(memlock.hard, -1);
+    }
+
+    #[test]
+    fn capabilities_absent_by_default() {
+        let toml_str = r#"
+name = "minimal"
+
+[[services]]
+name = "web"
+image = "nginx:latest"
+"#;
+
+        let manifest: ProductManifest = toml::from_str(toml_str).expect("minimal manifest should parse");
+        let svc = &manifest.services[0];
+
+        assert!(svc.command.is_none());
+        assert!(svc.cap_add.is_none());
+        assert!(svc.security_opt.is_none());
+        assert!(svc.ulimits.is_none());
     }
 
     #[test]

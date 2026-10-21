@@ -42,6 +42,10 @@ fn write_service(out: &mut String, svc: &ServiceDef) {
     let _ = writeln!(out, "  {}:", svc.name);
     let _ = writeln!(out, "    image: {}", svc.image);
 
+    write_command(out, svc);
+    write_cap_add(out, svc);
+    write_security_opt(out, svc);
+    write_ulimits(out, svc);
     write_environment(out, svc);
     write_volumes(out, svc);
     write_extra_hosts(out, svc);
@@ -90,6 +94,76 @@ fn write_caddy_service(out: &mut String, svc: &ServiceDef, manifest: &ProductMan
     write_depends_on(out, svc);
 
     out.push('\n');
+}
+
+fn write_command(out: &mut String, svc: &ServiceDef) {
+    let Some(command) = &svc.command else {
+        return;
+    };
+
+    if command.is_empty() {
+        return;
+    }
+
+    // Emit as a YAML flow sequence, escaping inner double quotes
+    let items: Vec<String> = command
+        .iter()
+        .map(|c| {
+            let escaped = c.replace('"', r#"\""#);
+            format!("\"{escaped}\"")
+        })
+        .collect();
+    let _ = writeln!(out, "    command: [{}]", items.join(", "));
+}
+
+fn write_cap_add(out: &mut String, svc: &ServiceDef) {
+    let Some(caps) = &svc.cap_add else {
+        return;
+    };
+
+    if caps.is_empty() {
+        return;
+    }
+
+    out.push_str("    cap_add:\n");
+
+    for cap in caps {
+        let _ = writeln!(out, "      - {cap}");
+    }
+}
+
+fn write_security_opt(out: &mut String, svc: &ServiceDef) {
+    let Some(opts) = &svc.security_opt else {
+        return;
+    };
+
+    if opts.is_empty() {
+        return;
+    }
+
+    out.push_str("    security_opt:\n");
+
+    for opt in opts {
+        let _ = writeln!(out, "      - \"{opt}\"");
+    }
+}
+
+fn write_ulimits(out: &mut String, svc: &ServiceDef) {
+    let Some(ulimits) = &svc.ulimits else {
+        return;
+    };
+
+    if ulimits.is_empty() {
+        return;
+    }
+
+    out.push_str("    ulimits:\n");
+
+    for (name, limit) in ulimits {
+        let _ = writeln!(out, "      {name}:");
+        let _ = writeln!(out, "        soft: {}", limit.soft);
+        let _ = writeln!(out, "        hard: {}", limit.hard);
+    }
 }
 
 fn write_environment(out: &mut String, svc: &ServiceDef) {
@@ -244,6 +318,11 @@ mod tests {
         default_catalog().get("runa").expect("runa manifest should parse")
     }
 
+    /// Parse the embedded Vortex manifest for reuse across tests
+    fn vortex_manifest() -> ProductManifest {
+        default_catalog().get("vortex").expect("vortex manifest should parse")
+    }
+
     fn tls_https() -> TlsMode {
         TlsMode::Https {
             cert: PathBuf::from("/certs/localhost.pem"),
@@ -260,12 +339,13 @@ mod tests {
             .unwrap_or_else(|| panic!("service {name} not found in output"));
         let rest = &output[start..];
         // A service block ends at the next blank line or end of string
-        let end = rest.find("\n\n").map_or(rest.len(), |i| i);
+        let end = rest.find("\n\n").unwrap_or(rest.len());
 
         rest[..end].to_owned()
     }
 
     #[test]
+    #[allow(clippy::similar_names)] // api/app mirror the real service names
     fn runa_compose_has_extra_hosts() {
         let manifest = runa_manifest();
         let output = generate_compose(&manifest, &tls_https());
@@ -284,6 +364,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::similar_names)] // api/app mirror the real service names
     fn runa_compose_has_node_tls_reject() {
         let manifest = runa_manifest();
         let output = generate_compose(&manifest, &tls_https());
@@ -338,6 +419,52 @@ mod tests {
             output.contains("80:80"),
             "HTTP mode caddy should have 80:80 port mapping"
         );
+    }
+
+    #[test]
+    fn vortex_compose_events_has_capabilities() {
+        let manifest = vortex_manifest();
+        let output = generate_compose(&manifest, &tls_https());
+
+        let events = service_block(&output, "events");
+
+        assert!(events.contains("cap_add:"), "events should declare cap_add");
+        assert!(events.contains("- SYS_NICE"), "events should add SYS_NICE");
+        assert!(events.contains("security_opt:"), "events should declare security_opt");
+        assert!(
+            events.contains("\"seccomp:unconfined\""),
+            "events should set seccomp:unconfined"
+        );
+        assert!(events.contains("ulimits:"), "events should declare ulimits");
+        assert!(events.contains("memlock:"), "events should set a memlock ulimit");
+        assert!(events.contains("soft: -1"), "memlock soft should be -1");
+        assert!(events.contains("hard: -1"), "memlock hard should be -1");
+    }
+
+    #[test]
+    fn vortex_compose_cache_has_command() {
+        let manifest = vortex_manifest();
+        let output = generate_compose(&manifest, &tls_https());
+
+        let cache = service_block(&output, "cache");
+
+        assert!(
+            cache.contains(r#"command: ["valkey-server", "--requirepass", "${CACHE_PASSWORD}"]"#),
+            "cache should emit the valkey command as a flow sequence, got:\n{cache}"
+        );
+    }
+
+    #[test]
+    fn vortex_compose_has_named_volumes() {
+        let manifest = vortex_manifest();
+        let output = generate_compose(&manifest, &tls_https());
+
+        for vol in ["db_data", "cache_data", "events_data", "caddy_data", "caddy_config"] {
+            assert!(
+                output.contains(&format!("  {vol}:")),
+                "volumes section should include {vol}"
+            );
+        }
     }
 
     #[test]

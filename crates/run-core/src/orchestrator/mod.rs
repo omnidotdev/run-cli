@@ -194,7 +194,7 @@ pub fn plan(product: &str, catalog: &dyn Catalog) -> crate::Result<String> {
         out.push_str("\nProxy routes:\n");
 
         for route in &proxy.routes {
-            let _ = writeln!(out, "  - :{} -> {}", route.listen_port, route.target,);
+            let _ = writeln!(out, "  - :{} -> {}", route.listen_port, route.target);
         }
     }
 
