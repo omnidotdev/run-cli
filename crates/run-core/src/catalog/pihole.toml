@@ -1,0 +1,28 @@
+name = "pihole"
+display_name = "Pi-hole"
+description = "Network-wide ad blocking and DNS"
+
+# A third-party (non-Omni) app: a single upstream image serving DNS on the host
+# plus a web admin UI, with an auto-generated admin password
+
+[[services]]
+name = "pihole"
+image = "pihole/pihole:2024.07.0"
+# DNS has to bind the host ports; the admin UI is published on 8089 so it does
+# not collide with anything already on port 80
+ports = ["53:53/tcp", "53:53/udp", "8089:80/tcp"]
+volumes = ["pihole_etc:/etc/pihole", "pihole_dnsmasq:/etc/dnsmasq.d"]
+
+[services.environment]
+TZ = "${TZ:-UTC}"
+WEBPASSWORD = "${WEBPASSWORD}"
+
+[services.healthcheck]
+test = ["CMD-SHELL", "dig +norecurse +retry=0 @127.0.0.1 pi.hole || exit 1"]
+interval = "30s"
+timeout = "5s"
+retries = 5
+start_period = "60s"
+
+[secrets]
+auto = [{ name = "WEBPASSWORD", method = "hex", length = 16 }]

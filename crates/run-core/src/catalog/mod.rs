@@ -30,18 +30,27 @@ const VORTEX_TOML: &str = include_str!("vortex.toml");
 /// Embedded Uptime Kuma manifest TOML (a third-party, non-Omni app).
 const UPTIME_KUMA_TOML: &str = include_str!("uptime-kuma.toml");
 
+/// Embedded Pi-hole manifest TOML (a third-party, non-Omni app).
+const PIHOLE_TOML: &str = include_str!("pihole.toml");
+
 impl Catalog for EmbeddedCatalog {
     fn get(&self, product: &str) -> crate::Result<ProductManifest> {
         match product {
             "runa" => toml::from_str(RUNA_TOML).map_err(|source| crate::Error::ParseManifest { source }),
             "vortex" => toml::from_str(VORTEX_TOML).map_err(|source| crate::Error::ParseManifest { source }),
             "uptime-kuma" => toml::from_str(UPTIME_KUMA_TOML).map_err(|source| crate::Error::ParseManifest { source }),
+            "pihole" => toml::from_str(PIHOLE_TOML).map_err(|source| crate::Error::ParseManifest { source }),
             _ => Err(crate::Error::ProductNotFound(product.to_owned())),
         }
     }
 
     fn list(&self) -> Vec<String> {
-        vec!["runa".to_owned(), "uptime-kuma".to_owned(), "vortex".to_owned()]
+        vec![
+            "pihole".to_owned(),
+            "runa".to_owned(),
+            "uptime-kuma".to_owned(),
+            "vortex".to_owned(),
+        ]
     }
 }
 
@@ -234,6 +243,16 @@ mod tests {
 
         assert_eq!(manifest.name, "runa");
         assert_eq!(manifest.services.len(), 6);
+    }
+
+    #[test]
+    fn pihole_manifest_parses() {
+        let catalog = default_catalog();
+        let manifest = catalog.get("pihole").expect("pihole manifest should parse");
+
+        assert_eq!(manifest.name, "pihole");
+        assert_eq!(manifest.services.len(), 1);
+        assert!(manifest.secrets.is_some(), "pihole should auto-generate a web password");
     }
 
     #[test]
@@ -438,7 +457,7 @@ services:
         let catalog = default_catalog();
         let products = catalog.list();
 
-        assert_eq!(products, vec!["runa", "uptime-kuma", "vortex"]);
+        assert_eq!(products, vec!["pihole", "runa", "uptime-kuma", "vortex"]);
     }
 
     #[test]
