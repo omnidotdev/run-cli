@@ -30,7 +30,7 @@ jobs:
         id: changesets
         uses: changesets/action@v2
         with:
-          version-script: bun run version && cargo update --workspace && git add Cargo.toml Cargo.lock
+          version-script: bun run version && cargo update --workspace && git add -A
           publish-script: |
             echo "Publishing run-cli@$(jq -r '.version' package.json)"
           pr-title: "chore(release): version packages"
@@ -43,7 +43,6 @@ jobs:
           # Detect the merged "version packages" commit even when changesets/action sets published=false
           FILES=$(git diff-tree --no-commit-id --name-only -r "$GITHUB_SHA")
           if echo "$FILES" | grep -q '^CHANGELOG.md$' \
-            && echo "$FILES" | grep -q '^Cargo.toml$' \
             && echo "$FILES" | grep -q '^package.json$'; then
             echo "version_commit=true" >> "$GITHUB_OUTPUT"
           else
@@ -100,10 +99,10 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - name: Get version from Cargo.toml
+      - name: Get version
         id: version
         run: |
-          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          VERSION=$(jq -r '.version' package.json)
           echo "version=$VERSION" >> $GITHUB_OUTPUT
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -136,6 +135,7 @@ jobs:
       - name: Update Homebrew tap
         env:
           TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+        if: env.TAP_GITHUB_TOKEN != ''
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           MACOS_X86_SHA256=$(shasum -a 256 artifacts/run-x86_64-apple-darwin/run-x86_64-apple-darwin.tar.gz | awk '{print $1}')
