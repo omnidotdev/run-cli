@@ -1,5 +1,11 @@
 # @omnidotdev/run-cli
 
+## 0.1.1
+
+### Patch Changes
+
+- [`caa3e85`](https://github.com/omnidotdev/run-cli/commit/caa3e851a93b6701119dee1107395567eff15043) Thanks [@coopbri](https://github.com/coopbri)! - Generate secrets from the operating system's random source (`getrandom`) instead of the `rand` crate, removing a low-severity `rand` soundness advisory. Secret values are unchanged.
+
 ## 0.1.0
 
 ### Minor Changes
