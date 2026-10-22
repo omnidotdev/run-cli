@@ -3,16 +3,20 @@ use std::path::Path;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use rand::Rng as _;
 use sha2::{Digest, Sha256};
 
 use crate::Error;
 
 /// Generate a random hex string of `len` bytes (output is `2*len` chars).
+///
+/// # Panics
+///
+/// Panics if the operating system's random source is unavailable, which should
+/// not happen on a supported platform.
 #[must_use]
 pub fn generate_hex(len: usize) -> String {
     let mut buf = vec![0u8; len];
-    rand::rng().fill(&mut buf[..]);
+    getrandom::fill(&mut buf).expect("OS random source should be available");
 
     buf.iter().fold(String::with_capacity(len * 2), |mut acc, b| {
         let _ = write!(acc, "{b:02x}");
