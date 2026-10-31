@@ -17,7 +17,9 @@ jobs:
         uses: oven-sh/setup-bun@v2
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.98.0
+        with:
+          components: clippy, rustfmt
 
       - name: Install dependencies
         run: bun install
