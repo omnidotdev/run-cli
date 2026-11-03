@@ -317,6 +317,11 @@ fn cmd_deploy(product: &str, to: &str, format: DeployFormat) -> Result<(), Box<d
                 })
                 .collect();
 
+            // The deploy spec exposes what the fractal.yaml drops as local-only
+            // (secrets to generate, URL env bindings, hooks, the proxy service to
+            // skip) so a cloud target can reproduce run's resolution.
+            let deploy_spec = serde_json::to_value(run_core::fractal::deploy_spec(&manifest))?;
+
             let info = json!({
                 "name": manifest.name,
                 "displayName": manifest.display_name,
@@ -326,6 +331,7 @@ fn cmd_deploy(product: &str, to: &str, format: DeployFormat) -> Result<(), Box<d
                 "hasSecrets": manifest.secrets.is_some(),
                 "hasProxy": manifest.proxy.is_some(),
                 "fractalManifest": yaml,
+                "deploySpec": deploy_spec,
                 "warnings": warnings,
             });
 
