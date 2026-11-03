@@ -1,4 +1,6 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+use serde_json::json;
+
 use run_core::catalog::Catalog;
 use run_core::config::state::ProjectDirs;
 use run_core::orchestrator::secrets;
@@ -92,7 +94,18 @@ enum Commands {
         /// Deploy target (currently only "fractal")
         #[arg(long, default_value = "fractal")]
         to: String,
+        /// Output format: `yaml` (the manifest) or `json` (the manifest plus
+        /// recipe metadata, for programmatic consumers such as run.omni.dev)
+        #[arg(long, value_enum, default_value_t = DeployFormat::Yaml)]
+        format: DeployFormat,
     },
+}
+
+/// Output format for `run deploy`.
+#[derive(Clone, Copy, ValueEnum)]
+enum DeployFormat {
+    Yaml,
+    Json,
 }
 
 #[tokio::main]
@@ -129,7 +142,7 @@ async fn main() {
             Commands::Backups { product } => cmd_backups(&product),
             Commands::Status { product } => cmd_status(product.as_deref()).await,
             Commands::Update { product, no_backup } => cmd_update(&product, no_backup).await,
-            Commands::Deploy { product, to } => cmd_deploy(&product, &to),
+            Commands::Deploy { product, to, format } => cmd_deploy(&product, &to, format),
         }
     } else {
         Cli::parse_from(["run", "--help"]);
@@ -264,7 +277,7 @@ async fn cmd_status(product: Option<&str>) -> Result<(), Box<dyn std::error::Err
     Ok(())
 }
 
-fn cmd_deploy(product: &str, to: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_deploy(product: &str, to: &str, format: DeployFormat) -> Result<(), Box<dyn std::error::Error>> {
     if to != "fractal" {
         return Err(format!("unknown deploy target `{to}` (only `fractal` is supported)").into());
     }
@@ -273,18 +286,66 @@ fn cmd_deploy(product: &str, to: &str) -> Result<(), Box<dyn std::error::Error>>
     let manifest = run_core::catalog::resolve(product, &catalog)?;
     let (yaml, warnings) = run_core::fractal::to_fractal_yaml(&manifest)?;
 
-    print!("{yaml}");
+    match format {
+        DeployFormat::Json => {
+            // Machine-readable: the fractal manifest plus the reduced recipe
+            // metadata a deploy UI renders (name, services, inputs, feature
+            // flags). stdout stays pure JSON so consumers can parse it directly.
+            let services: Vec<_> = manifest
+                .services
+                .iter()
+                .map(|service| {
+                    json!({
+                        "name": service.name,
+                        "image": service.image,
+                        "ports": service.ports.clone().unwrap_or_default(),
+                    })
+                })
+                .collect();
 
-    if !warnings.is_empty() {
-        eprintln!("\nwarnings:");
-        for warning in warnings {
-            eprintln!("  - {warning}");
+            let inputs: Vec<_> = manifest
+                .inputs
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .map(|input| {
+                    json!({
+                        "key": input.key,
+                        "label": input.label,
+                        "required": input.required.unwrap_or(false),
+                    })
+                })
+                .collect();
+
+            let info = json!({
+                "name": manifest.name,
+                "displayName": manifest.display_name,
+                "description": manifest.description,
+                "services": services,
+                "inputs": inputs,
+                "hasSecrets": manifest.secrets.is_some(),
+                "hasProxy": manifest.proxy.is_some(),
+                "fractalManifest": yaml,
+                "warnings": warnings,
+            });
+
+            println!("{}", serde_json::to_string_pretty(&info)?);
+        }
+        DeployFormat::Yaml => {
+            print!("{yaml}");
+
+            if !warnings.is_empty() {
+                eprintln!("\nwarnings:");
+                for warning in warnings {
+                    eprintln!("  - {warning}");
+                }
+            }
+
+            eprintln!(
+                "\nReview the manifest above, then import it at https://fractal.omni.dev (New Project -> Import -> Fractal)."
+            );
         }
     }
-
-    eprintln!(
-        "\nReview the manifest above, then import it at https://fractal.omni.dev (New Project -> Import -> Fractal)."
-    );
 
     Ok(())
 }

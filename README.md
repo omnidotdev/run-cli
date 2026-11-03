@@ -53,7 +53,7 @@ Each command takes a **target**: a catalog name, a path to a recipe (`run.toml` 
 | `run restore <target> <snapshot>` | Restore volumes from a snapshot |
 | `run status [target]` | Show a stack's services, or list every stack |
 | `run update <target>` | Pull the latest images and recreate; auto-rollback on failure |
-| `run deploy <target>` | Emit a `fractal.yaml` to deploy the stack to Fractal cloud |
+| `run deploy <target>` | Emit a `fractal.yaml` to deploy the stack to Fractal cloud (`--format json` adds recipe metadata for programmatic consumers) |
 
 Diagnose a stack with `run plan <target>` (a dry-run preview) and `run logs <target>`. Recipes, magic tokens, typed inputs, backups, and the built-in catalog are documented at [docs.omni.dev/products/run](https://docs.omni.dev/products/run).
 
