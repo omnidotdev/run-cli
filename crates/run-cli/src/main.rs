@@ -5,6 +5,8 @@ use run_core::catalog::Catalog;
 use run_core::config::state::ProjectDirs;
 use run_core::orchestrator::secrets;
 
+mod server;
+
 /// Run -- self-hosting made simple
 #[derive(Parser)]
 #[command(name = "run", version, about, args_conflicts_with_subcommands = true)]
@@ -87,6 +89,15 @@ enum Commands {
         #[arg(long)]
         no_backup: bool,
     },
+    /// Serve the local web dashboard for managing stacks in a browser
+    Serve {
+        /// Address to bind (use 0.0.0.0 to reach it from other devices on your network)
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        /// Port to listen on
+        #[arg(long, default_value_t = 7878)]
+        port: u16,
+    },
     /// Emit a fractal.yaml to deploy a stack to Fractal cloud
     Deploy {
         /// Product name or path
@@ -142,6 +153,7 @@ async fn main() {
             Commands::Backups { product } => cmd_backups(&product),
             Commands::Status { product } => cmd_status(product.as_deref()).await,
             Commands::Update { product, no_backup } => cmd_update(&product, no_backup).await,
+            Commands::Serve { host, port } => cmd_serve(&host, port).await,
             Commands::Deploy { product, to, format } => cmd_deploy(&product, &to, format),
         }
     } else {
@@ -275,6 +287,10 @@ async fn cmd_status(product: Option<&str>) -> Result<(), Box<dyn std::error::Err
     }
 
     Ok(())
+}
+
+async fn cmd_serve(host: &str, port: u16) -> Result<(), Box<dyn std::error::Error>> {
+    server::serve(host, port).await
 }
 
 fn cmd_deploy(product: &str, to: &str, format: DeployFormat) -> Result<(), Box<dyn std::error::Error>> {
