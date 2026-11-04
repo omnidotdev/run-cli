@@ -56,7 +56,7 @@ start_period = "60s"
 
 [[services]]
 name = "app"
-image = "api.manifold.omni.dev/omni/creator-app@sha256:680f412ae58acd5d080047f603baf1d795241e912099078ef93bf306e23c2cea"
+image = "api.manifold.omni.dev/omni/creator-app@sha256:24221e6b989be1979dfd57b64b2c00ae123c6736f64b39c650a79fb046dbec36"
 extra_hosts = ["localhost:host-gateway"]
 depends_on = [
   { service = "db", condition = "service_healthy" },
