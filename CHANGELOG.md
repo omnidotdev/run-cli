@@ -1,5 +1,21 @@
 # @omnidotdev/run-cli
 
+## 0.2.0
+
+### Minor Changes
+
+- [#31](https://github.com/omnidotdev/run-cli/pull/31) [`badf120`](https://github.com/omnidotdev/run-cli/commit/badf12045942009cd0e1f8fede81db035e046873) Thanks [@coopbri](https://github.com/coopbri)! - Add `run deploy <target> --format json`. Alongside the default `yaml` (the Fractal manifest), the `json` format emits the manifest plus reduced recipe metadata (display name, description, services, typed inputs, and whether the stack generates secrets or runs a reverse proxy) so programmatic consumers, such as the deploy experience on run.omni.dev, can render a review without re-parsing the recipe.
+
+- [#32](https://github.com/omnidotdev/run-cli/pull/32) [`2dfe301`](https://github.com/omnidotdev/run-cli/commit/2dfe301d61a496e72ae7749009ccdb15283ffd9b) Thanks [@coopbri](https://github.com/coopbri)! - Extend `run deploy <target> --format json` with a `deploySpec`: the resolution a
+  cloud target must reproduce that the `fractal.yaml` drops as local-only. It lists
+  the auto-secrets to generate (name/method/length), the URL bindings (which
+  service owns a public URL and which env vars, e.g. `BASE_URL`/`AUTH_BASE_URL`,
+  bind to it, derived from the recipe's proxy routes), the post-deploy hooks, and
+  the local proxy service to skip. This lets run.omni.dev / Fractal deploy a
+  multi-service recipe the way `run up` resolves it, instead of forking that logic.
+
+- [#23](https://github.com/omnidotdev/run-cli/pull/23) [`95bf22e`](https://github.com/omnidotdev/run-cli/commit/95bf22e94cb500b6f5dfc4c8b7cb12d119329528) Thanks [@coopbri](https://github.com/coopbri)! - Make `run up vortex` work out of the box. The Vortex catalog entry now enables Vortex's single-owner self-host mode (`SELF_HOST_MODE`) instead of pointing at an external Gatekeeper and Warden, so a self-hoster gets a working instance from one command with no external identity or authorization services to wire up. Built-in event schemas and workflows seed under the owner's organization.
+
 ## 0.1.1
 
 ### Patch Changes
