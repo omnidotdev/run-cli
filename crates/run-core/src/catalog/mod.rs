@@ -36,6 +36,9 @@ const PIHOLE_TOML: &str = include_str!("pihole.toml");
 /// Embedded Backfeed manifest TOML.
 const BACKFEED_TOML: &str = include_str!("backfeed.toml");
 
+/// Embedded Creator manifest TOML.
+const CREATOR_TOML: &str = include_str!("creator.toml");
+
 impl Catalog for EmbeddedCatalog {
     fn get(&self, product: &str) -> crate::Result<ProductManifest> {
         match product {
@@ -44,6 +47,7 @@ impl Catalog for EmbeddedCatalog {
             "uptime-kuma" => toml::from_str(UPTIME_KUMA_TOML).map_err(|source| crate::Error::ParseManifest { source }),
             "pihole" => toml::from_str(PIHOLE_TOML).map_err(|source| crate::Error::ParseManifest { source }),
             "backfeed" => toml::from_str(BACKFEED_TOML).map_err(|source| crate::Error::ParseManifest { source }),
+            "creator" => toml::from_str(CREATOR_TOML).map_err(|source| crate::Error::ParseManifest { source }),
             _ => Err(crate::Error::ProductNotFound(product.to_owned())),
         }
     }
@@ -51,6 +55,7 @@ impl Catalog for EmbeddedCatalog {
     fn list(&self) -> Vec<String> {
         vec![
             "backfeed".to_owned(),
+            "creator".to_owned(),
             "pihole".to_owned(),
             "runa".to_owned(),
             "uptime-kuma".to_owned(),
@@ -463,7 +468,10 @@ services:
         let catalog = default_catalog();
         let products = catalog.list();
 
-        assert_eq!(products, vec!["backfeed", "pihole", "runa", "uptime-kuma", "vortex"]);
+        assert_eq!(
+            products,
+            vec!["backfeed", "creator", "pihole", "runa", "uptime-kuma", "vortex"]
+        );
     }
 
     #[test]
@@ -476,6 +484,26 @@ services:
         // a standalone third-party app needs no Omni auth/proxy/secrets
         assert!(manifest.secrets.is_none());
         assert!(manifest.proxy.is_none());
+    }
+
+    #[test]
+    fn creator_manifest_parses() {
+        let catalog = default_catalog();
+        let manifest = catalog.get("creator").expect("creator manifest should parse");
+
+        assert_eq!(manifest.name, "creator");
+        // db, api, app, caddy
+        assert_eq!(manifest.services.len(), 4);
+        assert!(manifest.secrets.is_some());
+        assert!(manifest.proxy.is_some());
+        // self-host contract: the app runs single-owner without a Gatekeeper
+        let app = manifest
+            .services
+            .iter()
+            .find(|svc| svc.name == "app")
+            .expect("creator has an app service");
+        let env = app.environment.as_ref().expect("app has environment");
+        assert_eq!(env.get("SELF_HOST_MODE").map(String::as_str), Some("true"));
     }
 
     #[test]

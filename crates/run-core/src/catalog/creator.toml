@@ -1,0 +1,106 @@
+name = "creator"
+display_name = "Creator"
+description = "Self-hosted Creator instance"
+
+# ── Services ──────────────────────────────────────────────────────────
+
+[[services]]
+name = "db"
+image = "postgres:18-alpine"
+# postgres:18 moved its data dir under /var/lib/postgresql/<version>; mounting a
+# volume at /var/lib/postgresql/data makes the entrypoint exit 1, so mount the
+# parent directory instead
+volumes = ["db_data:/var/lib/postgresql"]
+
+[services.environment]
+POSTGRES_DB = "${DB_NAME:-creator}"
+POSTGRES_USER = "${DB_USER:-postgres}"
+POSTGRES_PASSWORD = "${DB_PASSWORD}"
+
+[services.healthcheck]
+test = ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres}"]
+interval = "5s"
+timeout = "5s"
+retries = 5
+
+[[services]]
+name = "api"
+image = "api.manifold.omni.dev/omni/creator-api@sha256:c69c562f78517f5059a814b98044b17b37031363a8eeb24b92cb025982a85071"
+extra_hosts = ["localhost:host-gateway"]
+depends_on = [{ service = "db", condition = "service_healthy" }]
+
+[services.environment]
+DATABASE_URL = "postgres://${DB_USER:-postgres}:${DB_PASSWORD}@db:5432/${DB_NAME:-creator}"
+# Self-host: the API serves anonymously (no external Gatekeeper to authenticate against)
+PROTECT_ROUTES = "false"
+PORT = "4000"
+HOST = "0.0.0.0"
+NODE_ENV = "production"
+CORS_ALLOWED_ORIGINS = "${BASE_URL}"
+# Optional local InvokeAI for offline GPU image generation; unset by default so
+# generation degrades gracefully. A self-hoster sets INVOKEAI_BASE_URL to opt in
+INVOKEAI_BASE_URL = "${INVOKEAI_BASE_URL:-}"
+
+[services.healthcheck]
+# The creator-api image runs on Bun (no curl), so probe with a Bun fetch
+test = [
+  "CMD",
+  "bun",
+  "-e",
+  "fetch('http://localhost:4000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+]
+interval = "10s"
+timeout = "5s"
+retries = 12
+start_period = "60s"
+
+[[services]]
+name = "app"
+image = "api.manifold.omni.dev/omni/creator-app@sha256:680f412ae58acd5d080047f603baf1d795241e912099078ef93bf306e23c2cea"
+extra_hosts = ["localhost:host-gateway"]
+depends_on = [
+  { service = "db", condition = "service_healthy" },
+  { service = "api", condition = "service_started" },
+]
+
+[services.environment]
+NODE_ENV = "production"
+# Single-owner self-host mode: a fixed owner, no external Gatekeeper. To run a
+# real multi-user Creator instead, unset SELF_HOST_MODE and point AUTH_BASE_URL /
+# VITE_AUTH_BASE_URL at a reachable Gatekeeper (SELF_HOST_MODE is ignored when set)
+SELF_HOST_MODE = "true"
+AUTH_SECRET = "${AUTH_SECRET}"
+BASE_URL = "${BASE_URL}"
+API_BASE_URL = "${API_BASE_URL}"
+API_INTERNAL_URL = "http://api:4000"
+DATABASE_URL = "postgres://${DB_USER:-postgres}:${DB_PASSWORD}@db:5432/${DB_NAME:-creator}"
+
+[[services]]
+name = "caddy"
+image = "caddy:2-alpine"
+depends_on = [
+  { service = "app", condition = "service_started" },
+  { service = "api", condition = "service_started" },
+]
+
+# ── Secrets ───────────────────────────────────────────────────────────
+
+[secrets]
+auto = [
+  { name = "DB_PASSWORD", method = "hex", length = 32 },
+  { name = "AUTH_SECRET", method = "hex", length = 32 },
+]
+
+# ── TLS ───────────────────────────────────────────────────────────────
+
+[tls]
+provider = "mkcert"
+
+# ── Proxy ─────────────────────────────────────────────────────────────
+
+[proxy]
+provider = "caddy"
+routes = [
+  { name = "app", listen_port = 443, listen_port_http = 80, target = "app:3000" },
+  { name = "api", listen_port = 4000, target = "api:4000" },
+]
