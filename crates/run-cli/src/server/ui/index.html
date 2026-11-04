@@ -71,6 +71,7 @@
         white-space: nowrap;
       }
       button.secondary { background: transparent; color: var(--text); }
+      .actions { display: flex; gap: 0.5rem; flex-shrink: 0; }
       button:disabled { opacity: 0.5; cursor: default; }
       .badge {
         font-size: 0.75rem;
@@ -130,17 +131,25 @@
         return res.status === 204 ? null : res.json();
       };
 
+      const VERBS = {
+        up: ["Starting…", "started"],
+        down: ["Stopping…", "stopped"],
+        update: ["Updating…", "updated"],
+      };
+
       const act = async (id, action, btn) => {
-        btn.disabled = true;
+        const siblings = btn.parentElement.querySelectorAll("button");
+        for (const b of siblings) b.disabled = true;
         const label = btn.textContent;
-        btn.textContent = action === "up" ? "Starting…" : "Stopping…";
+        const [busy, done] = VERBS[action] || ["Working…", "done"];
+        btn.textContent = busy;
         try {
           await json(`/api/stacks/${id}/${action}`, { method: "POST" });
-          toast(`${id} ${action === "up" ? "started" : "stopped"}.`);
+          toast(`${id} ${done}.`);
           await refresh();
         } catch (e) {
           toast(e.message || "Something went wrong.");
-          btn.disabled = false;
+          for (const b of siblings) b.disabled = false;
           btn.textContent = label;
         }
       };
@@ -161,11 +170,21 @@
           meta.innerHTML = `<div class="name"></div><div class="sub"><span class="badge ${running ? "running" : ""}"></span></div>`;
           meta.querySelector(".name").textContent = s.name;
           meta.querySelector(".badge").textContent = s.status;
+          const actions = document.createElement("div");
+          actions.className = "actions";
+          if (running) {
+            const upd = document.createElement("button");
+            upd.className = "secondary";
+            upd.textContent = "Update";
+            upd.onclick = () => act(s.name, "update", upd);
+            actions.append(upd);
+          }
           const btn = document.createElement("button");
           btn.className = "secondary";
           btn.textContent = running ? "Stop" : "Start";
           btn.onclick = () => act(s.name, running ? "down" : "up", btn);
-          card.append(meta, btn);
+          actions.append(btn);
+          card.append(meta, actions);
           box.append(card);
         }
       };

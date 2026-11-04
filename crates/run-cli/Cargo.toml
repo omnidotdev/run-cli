@@ -26,6 +26,7 @@ tracing-subscriber = { workspace = true }
 tokio = { workspace = true, features = ["net"] }
 axum = "0.8"
 rust-embed = { version = "8", features = ["mime-guess"] }
+webbrowser = "1"
 
 [dev-dependencies]
 cargo-husky = { workspace = true }

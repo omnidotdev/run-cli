@@ -97,6 +97,9 @@ enum Commands {
         /// Port to listen on
         #[arg(long, default_value_t = 7878)]
         port: u16,
+        /// Open the dashboard in your browser once it is ready
+        #[arg(long)]
+        open: bool,
     },
     /// Emit a fractal.yaml to deploy a stack to Fractal cloud
     Deploy {
@@ -153,7 +156,7 @@ async fn main() {
             Commands::Backups { product } => cmd_backups(&product),
             Commands::Status { product } => cmd_status(product.as_deref()).await,
             Commands::Update { product, no_backup } => cmd_update(&product, no_backup).await,
-            Commands::Serve { host, port } => cmd_serve(&host, port).await,
+            Commands::Serve { host, port, open } => cmd_serve(&host, port, open).await,
             Commands::Deploy { product, to, format } => cmd_deploy(&product, &to, format),
         }
     } else {
@@ -289,8 +292,8 @@ async fn cmd_status(product: Option<&str>) -> Result<(), Box<dyn std::error::Err
     Ok(())
 }
 
-async fn cmd_serve(host: &str, port: u16) -> Result<(), Box<dyn std::error::Error>> {
-    server::serve(host, port).await
+async fn cmd_serve(host: &str, port: u16, open: bool) -> Result<(), Box<dyn std::error::Error>> {
+    server::serve(host, port, open).await
 }
 
 fn cmd_deploy(product: &str, to: &str, format: DeployFormat) -> Result<(), Box<dyn std::error::Error>> {

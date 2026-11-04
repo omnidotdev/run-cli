@@ -67,13 +67,21 @@ fn valid_id(id: &str) -> bool {
 /// # Errors
 ///
 /// Returns an error if the address is invalid or the port cannot be bound.
-pub async fn serve(host: &str, port: u16) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn serve(host: &str, port: u16, open: bool) -> Result<(), Box<dyn std::error::Error>> {
     let addr: SocketAddr = format!("{host}:{port}").parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
 
+    let browse_host = if host == "0.0.0.0" { "localhost" } else { host };
+    let url = format!("http://{browse_host}:{port}");
     tracing::info!("run dashboard listening on http://{addr}");
-    if host == "127.0.0.1" || host == "localhost" {
-        tracing::info!("open http://localhost:{port} in your browser");
+    tracing::info!("open {url} in your browser");
+
+    // Open the dashboard in the default browser (the no-terminal entry point an
+    // installer or app icon uses); never fatal if there is no browser
+    if open {
+        if let Err(e) = webbrowser::open(&url) {
+            tracing::warn!("could not open a browser: {e}");
+        }
     }
 
     axum::serve(listener, router()).await?;
@@ -88,6 +96,7 @@ fn router() -> Router {
         .route("/api/stacks", get(stacks))
         .route("/api/stacks/{id}/up", post(up))
         .route("/api/stacks/{id}/down", post(down))
+        .route("/api/stacks/{id}/update", post(update))
         .fallback(assets)
 }
 
@@ -151,6 +160,23 @@ async fn down(Path(id): Path<String>) -> Result<StatusCode, ApiError> {
     }
 
     run_engine(move || async move { orchestrator::down(&id, false, false).await }).await?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Pull the latest images and recreate a stack (equivalent to `run update <id>`),
+/// taking a pre-update backup and rolling back if it fails to come up healthy.
+async fn update(Path(id): Path<String>) -> Result<StatusCode, ApiError> {
+    if !valid_id(&id) {
+        return Err(ApiError(format!("invalid stack id: {id}")));
+    }
+
+    run_engine(move || async move {
+        let catalog = default_catalog();
+        catalog.get(&id)?;
+        orchestrator::update(&id, &catalog, false).await
+    })
+    .await?;
 
     Ok(StatusCode::NO_CONTENT)
 }
