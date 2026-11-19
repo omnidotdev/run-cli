@@ -5,8 +5,12 @@ use tokio::process::Command;
 /// TLS mode resolved at startup.
 #[derive(Debug, Clone)]
 pub enum TlsMode {
+    /// Trusted local HTTPS at `localhost` via mkcert certificates
     Https { cert: PathBuf, key: PathBuf },
+    /// Plain HTTP at `localhost` (mkcert unavailable)
     Http,
+    /// Public HTTPS at a custom domain, with certificates Caddy obtains via ACME
+    Acme { domain: String },
 }
 
 /// Check whether `mkcert` is available on PATH.
@@ -72,7 +76,16 @@ pub async fn generate_certs(certs_dir: &Path) -> crate::Result<TlsMode> {
 #[must_use]
 pub const fn protocol(mode: &TlsMode) -> &'static str {
     match mode {
-        TlsMode::Https { .. } => "https",
+        TlsMode::Https { .. } | TlsMode::Acme { .. } => "https",
         TlsMode::Http => "http",
+    }
+}
+
+/// Return the public host a stack is served at under the resolved TLS mode.
+#[must_use]
+pub fn host(mode: &TlsMode) -> &str {
+    match mode {
+        TlsMode::Acme { domain } => domain,
+        TlsMode::Https { .. } | TlsMode::Http => crate::orchestrator::domain::LOCALHOST,
     }
 }

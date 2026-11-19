@@ -44,7 +44,7 @@ Each command takes a **target**: a catalog name, a path to a recipe (`run.toml` 
 
 | Command | Description |
 | --- | --- |
-| `run up <target>` | Start a stack (`run <target>` is shorthand) |
+| `run up <target>` | Start a stack (`run <target>` is shorthand); `--domain` serves it at your own domain |
 | `run down <target>` | Stop a stack; `--fresh` wipes data (auto-snapshots first unless `--no-backup`) |
 | `run ls` | List catalog apps |
 | `run plan <target>` | Preview what would start, without changes |
@@ -54,6 +54,18 @@ Each command takes a **target**: a catalog name, a path to a recipe (`run.toml` 
 | `run status [target]` | Show a stack's services, or list every stack |
 | `run update <target>` | Pull the latest images and recreate; auto-rollback on failure |
 | `run deploy <target>` | Emit a `fractal.yaml` to deploy the stack to Fractal cloud (`--format json` adds recipe metadata for programmatic consumers) |
+
+## Custom domains
+
+Stacks run at `localhost` by default. To serve one at your own domain with automatic, publicly trusted HTTPS:
+
+```bash
+run up runa --domain admin.example.com
+```
+
+The app is served at `https://admin.example.com` and each other route at its own subdomain (e.g. `https://api.admin.example.com`, `https://auth.admin.example.com`), all on port 443. Point those names at the host, either one A/AAAA record each or just two (`admin.example.com` and `*.admin.example.com`), and open TCP 80 and 443; `run up` prints the exact records. Certificates are obtained and renewed automatically, one per hostname.
+
+The domain is remembered per stack, so `run update` keeps it. Run `run up <target> --domain localhost` to switch back. `RUN_DOMAIN` works in place of the flag. Only stacks that run behind Run's reverse proxy can use a custom domain.
 
 Diagnose a stack with `run plan <target>` (a dry-run preview) and `run logs <target>`. Recipes, magic tokens, typed inputs, backups, and the built-in catalog are documented at [docs.omni.dev/products/run](https://docs.omni.dev/products/run).
 
