@@ -24,6 +24,10 @@ enum Commands {
     Up {
         /// Product name (e.g. "runa")
         product: String,
+        /// Serve the stack at your own domain (e.g. admin.example.com) with
+        /// automatic HTTPS, or `localhost` to switch back. Remembered per stack
+        #[arg(long, env = "RUN_DOMAIN")]
+        domain: Option<String>,
     },
     /// Stop a product stack
     Down {
@@ -135,10 +139,10 @@ async fn main() {
 
     // `run runa` is shorthand for `run up runa`
     let result = if let Some(product) = cli.product {
-        cmd_up(&product).await
+        cmd_up(&product, None).await
     } else if let Some(command) = cli.command {
         match command {
-            Commands::Up { product } => cmd_up(&product).await,
+            Commands::Up { product, domain } => cmd_up(&product, domain.as_deref()).await,
             Commands::Down {
                 product,
                 fresh,
@@ -171,9 +175,9 @@ async fn main() {
 }
 
 #[allow(clippy::future_not_send)] // Catalog is only used synchronously before any awaits
-async fn cmd_up(product: &str) -> Result<(), Box<dyn std::error::Error>> {
+async fn cmd_up(product: &str, domain: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
     let catalog = run_core::catalog::default_catalog();
-    run_core::orchestrator::up(product, &catalog).await?;
+    run_core::orchestrator::up(product, &catalog, domain).await?;
 
     Ok(())
 }
@@ -393,4 +397,32 @@ fn confirm(prompt: &str) -> bool {
     }
 
     matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn up_accepts_a_domain() {
+        let cli = Cli::try_parse_from(["run", "up", "runa", "--domain", "admin.example.com"]).expect("should parse");
+
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Up { ref product, domain: Some(ref domain) })
+                if product == "runa" && domain == "admin.example.com"
+        ));
+    }
+
+    #[test]
+    fn up_without_a_domain_keeps_the_persisted_one() {
+        // Guard against an ambient RUN_DOMAIN leaking into the assertion
+        if std::env::var_os("RUN_DOMAIN").is_some() {
+            return;
+        }
+
+        let cli = Cli::try_parse_from(["run", "up", "runa"]).expect("should parse");
+
+        assert!(matches!(cli.command, Some(Commands::Up { domain: None, .. })));
+    }
 }

@@ -226,6 +226,7 @@ fn synthesize_image(reference: &str) -> ProductManifest {
         proxy: None,
         hooks: None,
         inputs: None,
+        notes: None,
     }
 }
 

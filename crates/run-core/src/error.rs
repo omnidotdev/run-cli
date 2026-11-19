@@ -27,6 +27,8 @@ pub enum Error {
     Docker { message: String },
     #[error("healthcheck timed out after {seconds}s")]
     HealthTimeout { seconds: u64 },
+    #[error("invalid domain `{domain}`: {reason}")]
+    InvalidDomain { domain: String, reason: String },
     #[error("hook failed: {name}: {message}")]
     HookFailed { name: String, message: String },
 }

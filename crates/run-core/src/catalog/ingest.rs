@@ -85,6 +85,7 @@ pub fn ingest_compose(contents: &str, default_name: &str) -> crate::Result<Produ
         proxy: None,
         hooks: None,
         inputs: None,
+        notes: None,
     })
 }
 

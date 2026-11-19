@@ -1,6 +1,7 @@
 use std::fmt::Write as _;
 
-use crate::config::{ProductManifest, ServiceDef};
+use crate::config::{ProductManifest, ProxyRoute, ServiceDef};
+use crate::orchestrator::proxy;
 use crate::orchestrator::tls::TlsMode;
 
 /// Generate a Docker Compose YAML from a product manifest and TLS mode.
@@ -65,23 +66,15 @@ fn write_caddy_service(out: &mut String, svc: &ServiceDef, manifest: &ProductMan
     if let Some(proxy) = &manifest.proxy {
         out.push_str("    ports:\n");
 
-        for route in &proxy.routes {
-            let var = route.name.to_uppercase();
+        if let TlsMode::Acme { domain } = tls_mode {
+            // 80 serves the ACME HTTP challenge and the HTTP->HTTPS redirect;
+            // every hostname shares 443
+            out.push_str("      - \"80:80\"\n");
+            out.push_str("      - \"443:443\"\n");
 
-            if route.name == "app" {
-                let default = match tls_mode {
-                    TlsMode::Https { .. } => "443:443",
-                    TlsMode::Http => "80:80",
-                };
-
-                let _ = writeln!(out, "      - \"${{APP_PORT_MAP:-{default}}}\"");
-            } else {
-                let _ = writeln!(
-                    out,
-                    "      - \"${{{var}_PORT:-{port}}}:{port}\"",
-                    port = route.listen_port,
-                );
-            }
+            write_public_host_aliases(out, &proxy.routes, domain);
+        } else {
+            write_local_caddy_ports(out, &proxy.routes, tls_mode);
         }
     }
 
@@ -95,6 +88,42 @@ fn write_caddy_service(out: &mut String, svc: &ServiceDef, manifest: &ProductMan
     write_depends_on(out, svc);
 
     out.push('\n');
+}
+
+/// Alias every public hostname to caddy on the stack network, so a service's
+/// server-side call to a public URL (e.g. OIDC discovery at
+/// `https://auth.<domain>`) reaches caddy directly, with its real certificate,
+/// instead of leaving through the host's public IP.
+fn write_public_host_aliases(out: &mut String, routes: &[ProxyRoute], domain: &str) {
+    out.push_str("    networks:\n");
+    out.push_str("      default:\n");
+    out.push_str("        aliases:\n");
+
+    for host in proxy::public_hosts(routes, domain) {
+        let _ = writeln!(out, "          - {host}");
+    }
+}
+
+/// Publish caddy's ports at `localhost`, overridable per route via env vars.
+fn write_local_caddy_ports(out: &mut String, routes: &[ProxyRoute], tls_mode: &TlsMode) {
+    for route in routes {
+        let var = route.name.to_uppercase();
+
+        if route.name == "app" {
+            let default = match tls_mode {
+                TlsMode::Https { .. } | TlsMode::Acme { .. } => "443:443",
+                TlsMode::Http => "80:80",
+            };
+
+            let _ = writeln!(out, "      - \"${{APP_PORT_MAP:-{default}}}\"");
+        } else {
+            let _ = writeln!(
+                out,
+                "      - \"${{{var}_PORT:-{port}}}:{port}\"",
+                port = route.listen_port,
+            );
+        }
+    }
 }
 
 /// Publish a service's declared host ports. Without this a service only
@@ -392,13 +421,13 @@ mod tests {
 
         let api_block = service_block(&output, "api");
         assert!(
-            api_block.contains("NODE_TLS_REJECT_UNAUTHORIZED: 0"),
+            api_block.contains("NODE_TLS_REJECT_UNAUTHORIZED: ${tls.reject_unauthorized}"),
             "api should have NODE_TLS_REJECT_UNAUTHORIZED"
         );
 
         let app_block = service_block(&output, "app");
         assert!(
-            app_block.contains("NODE_TLS_REJECT_UNAUTHORIZED: 0"),
+            app_block.contains("NODE_TLS_REJECT_UNAUTHORIZED: ${tls.reject_unauthorized}"),
             "app should have NODE_TLS_REJECT_UNAUTHORIZED"
         );
     }
@@ -518,6 +547,48 @@ mod tests {
                 "volumes section should include {vol}"
             );
         }
+    }
+
+    fn tls_acme() -> TlsMode {
+        TlsMode::Acme {
+            domain: "admin.example.com".to_owned(),
+        }
+    }
+
+    #[test]
+    fn acme_caddy_publishes_only_80_and_443() {
+        let output = generate_compose(&runa_manifest(), &tls_acme());
+        let caddy = service_block(&output, "caddy");
+
+        assert!(caddy.contains("\"80:80\""), "caddy should publish 80, got:\n{caddy}");
+        assert!(caddy.contains("\"443:443\""), "caddy should publish 443, got:\n{caddy}");
+        assert!(!caddy.contains("3001"), "routes share 443 on subdomains, got:\n{caddy}");
+        assert!(!caddy.contains("4000"), "routes share 443 on subdomains, got:\n{caddy}");
+        assert!(
+            !caddy.contains("APP_PORT_MAP"),
+            "a custom domain pins 443, got:\n{caddy}"
+        );
+    }
+
+    #[test]
+    fn acme_aliases_every_public_host_to_caddy() {
+        let output = generate_compose(&runa_manifest(), &tls_acme());
+        let caddy = service_block(&output, "caddy");
+
+        assert!(
+            caddy.contains(
+                "    networks:\n      default:\n        aliases:\n          - admin.example.com\n          \
+                 - auth.admin.example.com\n          - api.admin.example.com\n"
+            ),
+            "caddy should answer for every public host on the stack network, got:\n{caddy}"
+        );
+    }
+
+    #[test]
+    fn localhost_modes_do_not_add_domain_aliases() {
+        let output = generate_compose(&runa_manifest(), &tls_https());
+
+        assert!(!output.contains("aliases:"));
     }
 
     #[test]

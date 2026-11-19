@@ -146,7 +146,7 @@ async fn up(Path(id): Path<String>) -> Result<StatusCode, ApiError> {
         // Create and use the catalog inside the future so it owns its data
         let catalog = default_catalog();
         catalog.get(&id)?;
-        orchestrator::up(&id, &catalog).await
+        orchestrator::up(&id, &catalog, None).await
     })
     .await?;
 

@@ -18,6 +18,11 @@ pub struct ProductManifest {
     pub proxy: Option<ProxyConfig>,
     pub hooks: Option<Vec<Hook>>,
     pub inputs: Option<Vec<InputDef>>,
+    /// Message printed once, after the stack's first successful start (e.g. a
+    /// one-time setup token to enter on first sign-in). `${NAME}` resolves
+    /// against the stack's generated secrets and URLs (`BASE_URL`, ...), and
+    /// magic tokens (`${app.*}`, `${input.*}`, `${secret.*}`) work as in services.
+    pub notes: Option<String>,
 }
 
 /// A typed user input a recipe prompts for, referenced via `${input.KEY}`.
@@ -95,8 +100,13 @@ pub struct SecretDef {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SecretMethod {
+    /// `length` random bytes as lowercase hex (`2 * length` characters)
     Hex,
+    /// A random UUID v4 (`length` is ignored)
     Uuid,
+    /// `length` random bytes as standard, padded base64, for apps that expect a
+    /// base64-encoded key of an exact size (e.g. a 32-byte encryption key)
+    Base64,
 }
 
 /// TLS configuration.
@@ -165,6 +175,23 @@ image = "nginx:latest"
         assert!(manifest.proxy.is_none());
         assert!(manifest.hooks.is_none());
         assert!(manifest.inputs.is_none());
+        assert!(manifest.notes.is_none());
+    }
+
+    #[test]
+    fn deserialize_notes() {
+        let toml_str = r#"
+name = "with-notes"
+notes = "Sign in at ${BASE_URL}"
+
+[[services]]
+name = "web"
+image = "nginx:latest"
+"#;
+
+        let manifest: ProductManifest = toml::from_str(toml_str).expect("notes manifest should parse");
+
+        assert_eq!(manifest.notes.as_deref(), Some("Sign in at ${BASE_URL}"));
     }
 
     #[test]
@@ -255,6 +282,26 @@ image = "nginx:latest"
         assert!(svc.cap_add.is_none());
         assert!(svc.security_opt.is_none());
         assert!(svc.ulimits.is_none());
+    }
+
+    #[test]
+    fn deserialize_base64_secret_method() {
+        let toml_str = r#"
+name = "keys"
+
+[[services]]
+name = "web"
+image = "nginx:latest"
+
+[secrets]
+auto = [{ name = "ENCRYPTION_KEY", method = "base64", length = 32 }]
+"#;
+
+        let manifest: ProductManifest = toml::from_str(toml_str).expect("base64 secret should parse");
+        let secret = &manifest.secrets.expect("secrets should be defined").auto[0];
+
+        assert!(matches!(secret.method, SecretMethod::Base64));
+        assert_eq!(secret.length, 32);
     }
 
     #[test]

@@ -96,7 +96,8 @@ pub fn to_fractal_yaml(manifest: &ProductManifest) -> crate::Result<(String, Vec
             env.iter()
                 .map(|(name, value)| FractalEnv {
                     name: name.clone(),
-                    value: value.clone(),
+                    // Fractal serves publicly trusted certificates
+                    value: crate::orchestrator::tokens::resolve_trusted_tls(value),
                 })
                 .collect()
         });
@@ -238,6 +239,7 @@ pub fn deploy_spec(manifest: &ProductManifest) -> DeploySpec {
                 method: match secret.method {
                     SecretMethod::Hex => "hex".to_owned(),
                     SecretMethod::Uuid => "uuid".to_owned(),
+                    SecretMethod::Base64 => "base64".to_owned(),
                 },
                 length: secret.length,
             })

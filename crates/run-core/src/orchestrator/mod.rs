@@ -1,12 +1,13 @@
 pub mod backup;
 pub mod compose;
+pub mod domain;
 pub mod healthcheck;
 pub mod hooks;
 mod inputs;
 pub mod proxy;
 pub mod secrets;
 pub mod tls;
-mod tokens;
+pub(crate) mod tokens;
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -23,63 +24,97 @@ use crate::docker;
 /// Mirrors the original `start.sh` flow: check docker, generate config,
 /// bring up containers, wait for health, run hooks, and print a summary.
 ///
+/// `domain` sets the public domain the stack is served at (e.g.
+/// `admin.example.com`, or `localhost` to switch back). It is persisted with the
+/// project, so `None` keeps whatever domain the stack was last started with
+/// (`localhost` for a new stack).
+///
 /// # Errors
 ///
 /// Returns errors from any step in the lifecycle (docker checks, file I/O,
-/// health timeout, hook failures).
+/// health timeout, hook failures), or `Error::InvalidDomain` for a malformed
+/// domain or a stack that cannot be served at one.
 #[allow(clippy::future_not_send)] // Catalog is only used synchronously before any awaits
-pub async fn up(product: &str, catalog: &dyn Catalog) -> crate::Result<()> {
+pub async fn up(product: &str, catalog: &dyn Catalog, domain: Option<&str>) -> crate::Result<()> {
     // Resolve manifest before any awaits so the non-Send catalog ref is dropped
     let mut manifest = crate::catalog::resolve(product, catalog)?;
 
     // A path target resolves to a recipe whose own name keys the project dirs
     let dirs = ProjectDirs::new(&manifest.name);
+    let env_file = dirs.env_file();
+    let first_run = !secrets::env_file_exists(&env_file);
 
-    // Resolve typed inputs (env overrides, then defaults), then expand magic
-    // tokens before secrets are generated, so `${secret.*}` is registered for
-    // generation and `${app.*}` / `${input.*}` are inlined
-    let input_values = resolve_inputs(&manifest)?;
-    let app_ctx = tokens::AppContext {
-        name: manifest.name.clone(),
-        fqdn: "localhost".to_owned(),
-        data_dir: dirs.root().display().to_string(),
-        inputs: input_values,
+    // Values saved with the stack on an earlier run (domain and inputs)
+    let saved_env = if first_run {
+        Vec::new()
+    } else {
+        secrets::load_env_file(&env_file)?
     };
-    tokens::expand(&mut manifest, &app_ctx);
+
+    // Settle the public domain before token expansion so `${app.fqdn}` sees it
+    let persisted = if first_run { None } else { persisted_domain(&env_file)? };
+    let (custom_domain, domain_changed) = resolve_domain(domain, persisted.as_deref())?;
+
+    if let Some(custom) = &custom_domain {
+        ensure_domain_servable(&manifest, custom)?;
+    }
+
+    // Resolve typed inputs (env overrides, saved values, prompts, then defaults)
+    let (input_values, chosen_inputs) = resolve_inputs(&manifest, &saved_env)?;
 
     docker::check_docker().await?;
+    dirs.ensure_dirs()?;
+
+    // Settle TLS before token expansion so `${app.fqdn}` and `${tls.*}` see it
+    let tls_mode = if first_run || domain_changed {
+        select_tls_mode(&dirs, custom_domain.clone()).await?
+    } else {
+        // Recover TLS mode from the existing .env
+        recover_tls_mode(&dirs, &env_file)?
+    };
+
+    // Expand magic tokens before secrets are generated, so `${secret.*}` is
+    // registered for generation and `${app.*}` / `${input.*}` / `${tls.*}` are
+    // inlined
+    let app_ctx = tokens::AppContext {
+        name: manifest.name.clone(),
+        fqdn: tls::host(&tls_mode).to_owned(),
+        data_dir: dirs.root().display().to_string(),
+        inputs: input_values,
+        tls_verify: tls::verified_in_containers(&tls_mode),
+    };
+    tokens::expand(&mut manifest, &app_ctx);
 
     // A bare-image stack (one service, no ports, no proxy) publishes the image's
     // exposed ports so `run up <image>` is reachable
     infer_image_ports(&mut manifest).await;
 
     let product = manifest.name.as_str();
-    dirs.ensure_dirs()?;
 
-    let env_file = dirs.env_file();
-    let first_run = !secrets::env_file_exists(&env_file);
-
-    let tls_mode = if first_run {
+    if first_run {
         // Wipe stale volumes so old secrets don't conflict
         tracing::info!("first run -- generating secrets");
         docker::wipe_volumes(product).await?;
 
-        let mode = tls::generate_certs(&dirs.certs_dir()).await?;
-
-        // Generate secrets and write .env with PROTOCOL
+        // Generate secrets and write .env with PROTOCOL (and the domain, if any)
         let secret_pairs = generate_secrets(&manifest);
-        let protocol = tls::protocol(&mode);
-
         let mut env_entries: Vec<(&str, &str)> = secret_pairs.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-        env_entries.push(("PROTOCOL", protocol));
+        env_entries.extend(tls_env_entries(&tls_mode));
 
         secrets::write_env_file(&env_file, &env_entries)?;
+    } else if domain_changed {
+        let from = persisted.as_deref().unwrap_or(domain::LOCALHOST);
+        let to = custom_domain.as_deref().unwrap_or(domain::LOCALHOST);
+        tracing::warn!(
+            "moving {product} from {from} to {to}; anything an app registered against the old URL on first run \
+             (e.g. OAuth redirect URIs) may need `run down {product} --fresh` to pick up the new one"
+        );
 
-        mode
-    } else {
-        // Recover TLS mode from the existing .env
-        recover_tls_mode(&dirs, &env_file)?
-    };
+        persist_tls_mode(&env_file, &tls_mode)?;
+    }
+
+    // Save the chosen inputs so later runs (and `run update`) reuse them
+    persist_inputs(&env_file, &chosen_inputs)?;
 
     // Generate and write Caddyfile
     let routes = manifest.proxy.as_ref().map_or(&[][..], |p| &p.routes);
@@ -130,11 +165,70 @@ pub async fn up(product: &str, catalog: &dyn Catalog) -> crate::Result<()> {
         eprintln!("  Ports: {}", access.ports.join(", "));
     }
 
+    if let tls::TlsMode::Acme { domain } = &tls_mode {
+        eprintln!();
+        for line in dns_instructions(routes, domain) {
+            eprintln!("  {line}");
+        }
+        eprintln!();
+    }
+
     eprintln!("  Stop:  run down {product}");
     eprintln!("  Logs:  run logs {product}");
     eprintln!("  Wipe:  run down {product} --fresh");
 
+    // The recipe's notes (e.g. a one-time setup token) show only after the
+    // first successful start, never again on later runs
+    if first_run {
+        print_notes(&manifest, &env_file, &runtime_env)?;
+    }
+
     Ok(())
+}
+
+/// Print a recipe's notes, resolved against the stack's env.
+fn print_notes(manifest: &ProductManifest, env_file: &Path, runtime_env: &[(String, String)]) -> crate::Result<()> {
+    let Some(notes) = &manifest.notes else {
+        return Ok(());
+    };
+
+    let env = build_hook_env(env_file, runtime_env)?;
+
+    eprintln!();
+    for line in render_notes(notes, &env).lines() {
+        eprintln!("  {line}");
+    }
+
+    Ok(())
+}
+
+/// Resolve `${NAME}` references in a recipe's notes from the stack's env
+/// (generated secrets plus runtime URLs). Unknown references stay literal.
+fn render_notes(notes: &str, env: &[(String, String)]) -> String {
+    let mut out = String::with_capacity(notes.len());
+    let mut rest = notes;
+
+    while let Some(start) = rest.find("${") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+
+        let Some(end) = after.find('}') else {
+            out.push_str(&rest[start..]);
+            return out;
+        };
+
+        let name = &after[..end];
+
+        match env.iter().find(|(k, _)| k == name) {
+            Some((_, value)) => out.push_str(value),
+            None => out.push_str(&rest[start..=start + 2 + end]),
+        }
+
+        rest = &after[end + 1..];
+    }
+
+    out.push_str(rest);
+    out
 }
 
 /// Stop a running product, optionally wiping all data.
@@ -212,13 +306,20 @@ pub async fn update(product: &str, catalog: &dyn Catalog, no_backup: bool) -> cr
         )));
     }
 
+    // Keep the domain the stack was started with, so an update never silently
+    // moves a custom-domain stack back to localhost
+    let tls_mode = recover_tls_mode(&dirs, &env_file)?;
+
     // Reproduce up()'s manifest preparation so the regenerated compose matches
-    let input_values = resolve_inputs(&manifest)?;
+    let saved_env = secrets::load_env_file(&env_file)?;
+    let (input_values, chosen_inputs) = resolve_inputs(&manifest, &saved_env)?;
+    persist_inputs(&env_file, &chosen_inputs)?;
     let app_ctx = tokens::AppContext {
         name: manifest.name.clone(),
-        fqdn: "localhost".to_owned(),
+        fqdn: tls::host(&tls_mode).to_owned(),
         data_dir: dirs.root().display().to_string(),
         inputs: input_values,
+        tls_verify: tls::verified_in_containers(&tls_mode),
     };
     tokens::expand(&mut manifest, &app_ctx);
 
@@ -226,7 +327,6 @@ pub async fn update(product: &str, catalog: &dyn Catalog, no_backup: bool) -> cr
     infer_image_ports(&mut manifest).await;
 
     let product = manifest.name.as_str();
-    let tls_mode = recover_tls_mode(&dirs, &env_file)?;
 
     // Capture the exact images running now so a failed update can roll back to them
     let pre_images = docker::service_image_ids(dirs.root(), &env_file)
@@ -345,10 +445,149 @@ fn apply_image_pins(manifest: &ProductManifest, pins: &[(String, String)]) -> Pr
     pinned
 }
 
+/// `.env` key persisting a stack's custom domain (absent for `localhost`).
+const DOMAIN_ENV_KEY: &str = "RUN_DOMAIN";
+
+/// `.env` key persisting a stack's URL scheme.
+const PROTOCOL_ENV_KEY: &str = "PROTOCOL";
+
+/// Settle the effective custom domain from the requested value (if any) and the
+/// one persisted with the project. Returns the custom domain (`None` for
+/// `localhost`) and whether it differs from the persisted one.
+///
+/// # Errors
+///
+/// Returns `Error::InvalidDomain` if the requested domain is malformed.
+fn resolve_domain(requested: Option<&str>, persisted: Option<&str>) -> crate::Result<(Option<String>, bool)> {
+    let Some(raw) = requested else {
+        return Ok((persisted.map(ToOwned::to_owned), false));
+    };
+
+    let custom = domain::normalize(raw)?;
+    let changed = custom.as_deref() != persisted;
+
+    Ok((custom, changed))
+}
+
+/// Check a stack can be served at a custom domain: it needs a reverse proxy
+/// (a recipe that publishes ports directly has nothing to serve the domain),
+/// and every route becomes a subdomain, so each route name must be a DNS label.
+fn ensure_domain_servable(manifest: &ProductManifest, custom_domain: &str) -> crate::Result<()> {
+    let invalid = |reason: String| crate::Error::InvalidDomain {
+        domain: custom_domain.to_owned(),
+        reason,
+    };
+
+    let Some(proxy_config) = &manifest.proxy else {
+        return Err(invalid(format!(
+            "{} publishes its ports directly and has no reverse proxy to serve a custom domain",
+            manifest.name
+        )));
+    };
+
+    let subdomains = proxy::public_hosts(&proxy_config.routes, custom_domain);
+
+    for host in &subdomains {
+        if domain::normalize(host)?.as_deref() != Some(host.as_str()) {
+            return Err(invalid(format!(
+                "{} has a route that cannot be a subdomain ({host})",
+                manifest.name
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+/// The DNS records a custom-domain stack needs, as lines for the summary.
+fn dns_instructions(routes: &[ProxyRoute], domain: &str) -> Vec<String> {
+    let hosts = proxy::public_hosts(routes, domain);
+    let mut lines = vec!["DNS:   create these A (and AAAA) records pointing at this host:".to_owned()];
+
+    lines.extend(hosts.iter().map(|host| format!("         {host}")));
+
+    if hosts.len() > 1 {
+        lines.push(format!("       or just two: {domain} and *.{domain}"));
+    }
+
+    lines.push("Open:  TCP 80 and 443 (HTTPS certificates are issued automatically)".to_owned());
+
+    lines
+}
+
+/// Pick the TLS mode for a stack: ACME at a custom domain, else mkcert at
+/// `localhost` (falling back to HTTP without mkcert).
+async fn select_tls_mode(dirs: &ProjectDirs, custom_domain: Option<String>) -> crate::Result<tls::TlsMode> {
+    match custom_domain {
+        Some(domain) => Ok(tls::TlsMode::Acme { domain }),
+        None => tls::generate_certs(&dirs.certs_dir()).await,
+    }
+}
+
+/// The `.env` entries that persist a TLS mode across runs.
+fn tls_env_entries(mode: &tls::TlsMode) -> Vec<(&'static str, &str)> {
+    let mut entries = vec![(PROTOCOL_ENV_KEY, tls::protocol(mode))];
+
+    if let tls::TlsMode::Acme { domain } = mode {
+        entries.push((DOMAIN_ENV_KEY, domain.as_str()));
+    }
+
+    entries
+}
+
+/// Rewrite the TLS entries of an existing `.env`, keeping every other value
+/// (generated secrets in particular) untouched.
+fn persist_tls_mode(env_file: &Path, mode: &tls::TlsMode) -> crate::Result<()> {
+    secrets::update_env_file(
+        env_file,
+        |k| k == PROTOCOL_ENV_KEY || k == DOMAIN_ENV_KEY,
+        &tls_env_entries(mode),
+    )
+}
+
+/// Save the explicitly chosen input values in the stack's `.env` (as
+/// `RUN_INPUT_<KEY>`, next to the generated secrets), replacing any saved
+/// earlier. Defaults are not saved, so a recipe's new default still applies.
+fn persist_inputs(env_file: &Path, chosen: &BTreeMap<String, String>) -> crate::Result<()> {
+    let entries: Vec<(String, &str)> = chosen
+        .iter()
+        .filter(|(key, value)| {
+            // A line break would split the entry, so such a value is used for
+            // this run but not saved
+            let single_line = !value.contains(['\n', '\r']);
+            if !single_line {
+                tracing::warn!("input {key} spans several lines and is not saved; pass it again next time");
+            }
+            single_line
+        })
+        .map(|(key, value)| (inputs::env_key(key), value.as_str()))
+        .collect();
+    let refs: Vec<(&str, &str)> = entries.iter().map(|(k, v)| (k.as_str(), *v)).collect();
+
+    secrets::update_env_file(env_file, |k| k.starts_with(inputs::ENV_PREFIX), &refs)
+}
+
+/// Read the custom domain persisted in a project's `.env`, if any.
+fn persisted_domain(env_file: &Path) -> crate::Result<Option<String>> {
+    let existing = secrets::load_env_file(env_file)?;
+
+    Ok(existing
+        .into_iter()
+        .find(|(k, v)| k == DOMAIN_ENV_KEY && !v.is_empty())
+        .map(|(_, v)| v))
+}
+
 /// Recover the TLS mode of an already-started stack from its persisted `.env`.
 fn recover_tls_mode(dirs: &ProjectDirs, env_file: &Path) -> crate::Result<tls::TlsMode> {
+    if let Some(domain) = persisted_domain(env_file)? {
+        return Ok(tls::TlsMode::Acme { domain });
+    }
+
     let existing = secrets::load_env_file(env_file)?;
-    let protocol = existing.iter().find(|(k, _)| k == "PROTOCOL").map(|(_, v)| v.as_str());
+    let protocol = existing
+        .iter()
+        .find(|(k, _)| k == PROTOCOL_ENV_KEY)
+        .map(|(_, v)| v.as_str());
 
     Ok(match protocol {
         Some("https") => {
@@ -414,25 +653,23 @@ pub fn plan(product: &str, catalog: &dyn Catalog) -> crate::Result<String> {
     Ok(out)
 }
 
-/// Resolve a manifest's typed inputs from `RUN_INPUT_<KEY>` env overrides, then
-/// declared defaults.
-fn resolve_inputs(manifest: &ProductManifest) -> crate::Result<BTreeMap<String, String>> {
+/// Resolve a manifest's typed inputs from `RUN_INPUT_<KEY>` env overrides, the
+/// values saved with the stack, interactive answers, then declared defaults.
+///
+/// Returns the resolved values and the explicitly chosen ones (overrides, saved
+/// values and answers) to save for the next run.
+fn resolve_inputs(
+    manifest: &ProductManifest,
+    saved_env: &[(String, String)],
+) -> crate::Result<(BTreeMap<String, String>, BTreeMap<String, String>)> {
     let Some(defs) = &manifest.inputs else {
-        return Ok(BTreeMap::new());
+        return Ok((BTreeMap::new(), BTreeMap::new()));
     };
 
-    let mut overrides = BTreeMap::new();
+    let mut overrides = inputs::chosen_values(defs, |var| std::env::var(var).ok(), saved_env);
 
-    for def in defs {
-        let var = format!("RUN_INPUT_{}", def.key.to_ascii_uppercase());
-
-        if let Ok(value) = std::env::var(&var) {
-            overrides.insert(def.key.clone(), value);
-        }
-    }
-
-    // Prompt interactively for any input without an env override; a blank answer
-    // falls through to the input's default
+    // Prompt interactively for any input with neither an env override nor a
+    // saved value; a blank answer falls through to the input's default
     if std::io::stdin().is_terminal() {
         for def in defs {
             if overrides.contains_key(&def.key) {
@@ -445,7 +682,9 @@ fn resolve_inputs(manifest: &ProductManifest) -> crate::Result<BTreeMap<String, 
         }
     }
 
-    inputs::resolve(defs, &overrides)
+    let resolved = inputs::resolve(defs, &overrides)?;
+
+    Ok((resolved, overrides))
 }
 
 /// Prompt on stderr for one input, returning the trimmed answer or `None` when
@@ -580,6 +819,7 @@ fn generate_secrets(manifest: &ProductManifest) -> Vec<(String, String)> {
             let value = match def.method {
                 crate::config::SecretMethod::Hex => secrets::generate_hex(def.length),
                 crate::config::SecretMethod::Uuid => uuid_v4(),
+                crate::config::SecretMethod::Base64 => secrets::generate_base64(def.length),
             };
 
             (def.name.clone(), value)
@@ -617,9 +857,13 @@ struct Access {
 }
 
 /// Build the browser URL for a proxy route under the active TLS mode, omitting
-/// the port when it is the scheme default.
-fn proxy_route_url(route: &ProxyRoute, tls_mode: &tls::TlsMode) -> String {
+/// the port when it is the scheme default. Under a custom domain the primary
+/// route is the bare domain and every other route its own subdomain.
+fn proxy_route_url(route: &ProxyRoute, routes: &[ProxyRoute], tls_mode: &tls::TlsMode) -> String {
     let (scheme, port, default_port) = match tls_mode {
+        tls::TlsMode::Acme { domain } => {
+            return format!("https://{}", proxy::public_host(route, routes, domain));
+        }
         tls::TlsMode::Https { .. } => ("https", route.listen_port, 443),
         tls::TlsMode::Http => ("http", route.listen_port_http.unwrap_or(route.listen_port), 80),
     };
@@ -687,12 +931,12 @@ fn access_summary(manifest: &ProductManifest, tls_mode: &tls::TlsMode) -> Access
             .or_else(|| proxy.routes.first());
         let app_name = app.map(|route| route.name.as_str());
 
-        let primary = app.map(|route| proxy_route_url(route, tls_mode));
+        let primary = app.map(|route| proxy_route_url(route, &proxy.routes, tls_mode));
         let extra = proxy
             .routes
             .iter()
             .filter(|route| Some(route.name.as_str()) != app_name)
-            .map(|route| (title_case(&route.name), proxy_route_url(route, tls_mode)))
+            .map(|route| (title_case(&route.name), proxy_route_url(route, &proxy.routes, tls_mode)))
             .collect();
 
         return Access {
@@ -732,12 +976,13 @@ fn runtime_env_vars(manifest: &ProductManifest, tls_mode: &tls::TlsMode) -> Vec<
 
     if let Some(proxy) = &manifest.proxy {
         for route in &proxy.routes {
-            let url = proxy_route_url(route, tls_mode);
+            let url = proxy_route_url(route, &proxy.routes, tls_mode);
 
             if route.name == "app" {
                 vars.push(("BASE_URL".to_owned(), url.clone()));
 
                 let port = match tls_mode {
+                    tls::TlsMode::Acme { .. } => 443,
                     tls::TlsMode::Https { .. } => route.listen_port,
                     tls::TlsMode::Http => route.listen_port_http.unwrap_or(route.listen_port),
                 };
@@ -880,8 +1125,14 @@ image = "nginx:latest"
             listen_port_http: Some(80),
         };
 
-        assert_eq!(proxy_route_url(&route, &tls_https()), "https://localhost");
-        assert_eq!(proxy_route_url(&route, &tls::TlsMode::Http), "http://localhost");
+        assert_eq!(
+            proxy_route_url(&route, std::slice::from_ref(&route), &tls_https()),
+            "https://localhost"
+        );
+        assert_eq!(
+            proxy_route_url(&route, std::slice::from_ref(&route), &tls::TlsMode::Http),
+            "http://localhost"
+        );
     }
 
     #[test]
@@ -893,7 +1144,10 @@ image = "nginx:latest"
             listen_port_http: None,
         };
 
-        assert_eq!(proxy_route_url(&route, &tls_https()), "https://localhost:3001");
+        assert_eq!(
+            proxy_route_url(&route, std::slice::from_ref(&route), &tls_https()),
+            "https://localhost:3001"
+        );
     }
 
     #[test]
@@ -990,6 +1244,209 @@ image = "nginx:latest"
         // db has no pin, so it keeps its recipe image
         let db = pinned.services.iter().find(|s| s.name == "db").expect("db service");
         assert_eq!(db.image, "postgres:16-alpine");
+    }
+
+    fn tls_acme() -> tls::TlsMode {
+        tls::TlsMode::Acme {
+            domain: "admin.example.com".to_owned(),
+        }
+    }
+
+    #[test]
+    #[allow(clippy::similar_names)] // auth/api mirror the real route names
+    fn runtime_env_vars_use_the_custom_domain() {
+        let manifest = default_catalog().get("runa").expect("runa manifest should parse");
+        let env = runtime_env_vars(&manifest, &tls_acme());
+        let get = |key: &str| env.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str());
+
+        assert_eq!(get("BASE_URL"), Some("https://admin.example.com"));
+        assert_eq!(get("APP_BASE_URL"), Some("https://admin.example.com"));
+        assert_eq!(get("AUTH_BASE_URL"), Some("https://auth.admin.example.com"));
+        assert_eq!(get("API_BASE_URL"), Some("https://api.admin.example.com"));
+        assert_eq!(get("APP_PORT_MAP"), Some("443:443"));
+    }
+
+    #[test]
+    fn access_summary_uses_the_custom_domain() {
+        let manifest = default_catalog().get("runa").expect("runa manifest should parse");
+        let access = access_summary(&manifest, &tls_acme());
+
+        assert_eq!(access.primary.as_deref(), Some("https://admin.example.com"));
+        assert!(
+            access
+                .extra
+                .iter()
+                .any(|(l, u)| l == "Api" && u == "https://api.admin.example.com"),
+            "expected an Api route on the custom domain, got {:?}",
+            access.extra
+        );
+    }
+
+    #[test]
+    fn resolve_domain_defaults_to_the_persisted_one() {
+        assert_eq!(resolve_domain(None, None).expect("ok"), (None, false));
+        assert_eq!(
+            resolve_domain(None, Some("admin.example.com")).expect("ok"),
+            (Some("admin.example.com".to_owned()), false)
+        );
+    }
+
+    #[test]
+    fn resolve_domain_detects_a_change() {
+        assert_eq!(
+            resolve_domain(Some("Admin.Example.com"), None).expect("ok"),
+            (Some("admin.example.com".to_owned()), true)
+        );
+        assert_eq!(
+            resolve_domain(Some("admin.example.com"), Some("admin.example.com")).expect("ok"),
+            (Some("admin.example.com".to_owned()), false)
+        );
+        assert_eq!(
+            resolve_domain(Some("localhost"), Some("admin.example.com")).expect("ok"),
+            (None, true)
+        );
+    }
+
+    #[test]
+    fn resolve_domain_rejects_a_malformed_domain() {
+        assert!(matches!(
+            resolve_domain(Some("https://admin.example.com"), None),
+            Err(crate::Error::InvalidDomain { .. })
+        ));
+    }
+
+    #[test]
+    fn ensure_proxied_rejects_a_port_publishing_stack() {
+        let proxied = default_catalog().get("runa").expect("runa manifest should parse");
+        let direct = default_catalog()
+            .get("uptime-kuma")
+            .expect("uptime-kuma manifest should parse");
+
+        assert!(ensure_domain_servable(&proxied, "admin.example.com").is_ok());
+        assert!(matches!(
+            ensure_domain_servable(&direct, "status.example.com"),
+            Err(crate::Error::InvalidDomain { .. })
+        ));
+    }
+
+    #[test]
+    fn dns_instructions_list_every_host_and_the_wildcard_shortcut() {
+        let manifest = default_catalog().get("runa").expect("runa manifest should parse");
+        let routes = &manifest.proxy.expect("proxy").routes;
+        let lines = dns_instructions(routes, "admin.example.com").join("\n");
+
+        for host in ["admin.example.com", "auth.admin.example.com", "api.admin.example.com"] {
+            assert!(lines.contains(host), "missing {host} in:\n{lines}");
+        }
+        assert!(
+            lines.contains("admin.example.com and *.admin.example.com"),
+            "got:\n{lines}"
+        );
+        assert!(lines.contains("TCP 80 and 443"), "got:\n{lines}");
+    }
+
+    #[test]
+    fn a_route_name_that_is_not_a_dns_label_is_rejected() {
+        let mut manifest = default_catalog().get("runa").expect("runa manifest should parse");
+        manifest.proxy.as_mut().expect("proxy").routes[1].name = "auth_server".to_owned();
+
+        assert!(matches!(
+            ensure_domain_servable(&manifest, "admin.example.com"),
+            Err(crate::Error::InvalidDomain { .. })
+        ));
+    }
+
+    #[test]
+    fn chosen_inputs_are_saved_beside_the_secrets() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let env_file = dir.path().join(".env");
+        std::fs::write(&env_file, "DB_PASSWORD=secret\nRUN_INPUT_STALE=old").expect("write env");
+
+        let mut chosen = BTreeMap::new();
+        chosen.insert("oidc_issuer".to_owned(), "https://idp.example.com".to_owned());
+        chosen.insert("note".to_owned(), "two\nlines".to_owned());
+        persist_inputs(&env_file, &chosen).expect("persist");
+
+        let env = secrets::load_env_file(&env_file).expect("load");
+        assert_eq!(
+            env,
+            [
+                ("DB_PASSWORD".to_owned(), "secret".to_owned()),
+                ("RUN_INPUT_OIDC_ISSUER".to_owned(), "https://idp.example.com".to_owned()),
+            ],
+            "stale inputs are replaced and multi-line values are not saved"
+        );
+
+        // The saved value is what the next run resolves
+        let manifest: ProductManifest = toml::from_str(
+            r#"
+name = "x"
+
+[[services]]
+name = "web"
+image = "nginx"
+
+[[inputs]]
+key = "oidc_issuer"
+default = ""
+"#,
+        )
+        .expect("manifest");
+        let defs = manifest.inputs.expect("inputs");
+        let next = inputs::chosen_values(&defs, |_| None, &env);
+        assert_eq!(
+            next.get("oidc_issuer").map(String::as_str),
+            Some("https://idp.example.com")
+        );
+    }
+
+    #[test]
+    fn render_notes_fills_secrets_and_urls() {
+        let env = vec![
+            ("SETUP_TOKEN".to_owned(), "abc123".to_owned()),
+            ("BASE_URL".to_owned(), "https://admin.example.com".to_owned()),
+        ];
+
+        assert_eq!(
+            render_notes("Open ${BASE_URL} and enter ${SETUP_TOKEN}.", &env),
+            "Open https://admin.example.com and enter abc123."
+        );
+    }
+
+    #[test]
+    fn render_notes_leaves_unknown_references_literal() {
+        assert_eq!(render_notes("Use ${MISSING} or ${", &[]), "Use ${MISSING} or ${");
+    }
+
+    #[test]
+    fn a_custom_domain_round_trips_through_the_env_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let env_file = dir.path().join(".env");
+        std::fs::write(&env_file, "DB_PASSWORD=secret\nPROTOCOL=https").expect("write env");
+        let dirs = ProjectDirs::new("custom-domain-test");
+
+        persist_tls_mode(&env_file, &tls_acme()).expect("persist");
+
+        let env = secrets::load_env_file(&env_file).expect("load");
+        assert!(
+            env.contains(&("DB_PASSWORD".to_owned(), "secret".to_owned())),
+            "secrets are kept"
+        );
+        assert!(env.contains(&("RUN_DOMAIN".to_owned(), "admin.example.com".to_owned())));
+        assert_eq!(env.iter().filter(|(k, _)| k == "PROTOCOL").count(), 1);
+        assert!(matches!(
+            recover_tls_mode(&dirs, &env_file).expect("recover"),
+            tls::TlsMode::Acme { domain } if domain == "admin.example.com"
+        ));
+
+        // Switching back to localhost drops the persisted domain
+        persist_tls_mode(&env_file, &tls::TlsMode::Http).expect("persist");
+
+        assert_eq!(persisted_domain(&env_file).expect("load"), None);
+        assert!(matches!(
+            recover_tls_mode(&dirs, &env_file).expect("recover"),
+            tls::TlsMode::Http
+        ));
     }
 
     #[test]
