@@ -7,7 +7,7 @@ mod inputs;
 pub mod proxy;
 pub mod secrets;
 pub mod tls;
-mod tokens;
+pub(crate) mod tokens;
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -59,43 +59,49 @@ pub async fn up(product: &str, catalog: &dyn Catalog, domain: Option<&str>) -> c
         ensure_domain_servable(&manifest, custom)?;
     }
 
-    // Resolve typed inputs (env overrides, saved values, prompts, then
-    // defaults), then expand magic tokens before secrets are generated, so
-    // `${secret.*}` is registered for generation and `${app.*}` / `${input.*}`
-    // are inlined
+    // Resolve typed inputs (env overrides, saved values, prompts, then defaults)
     let (input_values, chosen_inputs) = resolve_inputs(&manifest, &saved_env)?;
-    let app_ctx = tokens::AppContext {
-        name: manifest.name.clone(),
-        fqdn: custom_domain.clone().unwrap_or_else(|| domain::LOCALHOST.to_owned()),
-        data_dir: dirs.root().display().to_string(),
-        inputs: input_values,
-    };
-    tokens::expand(&mut manifest, &app_ctx);
 
     docker::check_docker().await?;
+    dirs.ensure_dirs()?;
+
+    // Settle TLS before token expansion so `${app.fqdn}` and `${tls.*}` see it
+    let tls_mode = if first_run || domain_changed {
+        select_tls_mode(&dirs, custom_domain.clone()).await?
+    } else {
+        // Recover TLS mode from the existing .env
+        recover_tls_mode(&dirs, &env_file)?
+    };
+
+    // Expand magic tokens before secrets are generated, so `${secret.*}` is
+    // registered for generation and `${app.*}` / `${input.*}` / `${tls.*}` are
+    // inlined
+    let app_ctx = tokens::AppContext {
+        name: manifest.name.clone(),
+        fqdn: tls::host(&tls_mode).to_owned(),
+        data_dir: dirs.root().display().to_string(),
+        inputs: input_values,
+        tls_verify: tls::verified_in_containers(&tls_mode),
+    };
+    tokens::expand(&mut manifest, &app_ctx);
 
     // A bare-image stack (one service, no ports, no proxy) publishes the image's
     // exposed ports so `run up <image>` is reachable
     infer_image_ports(&mut manifest).await;
 
     let product = manifest.name.as_str();
-    dirs.ensure_dirs()?;
 
-    let tls_mode = if first_run {
+    if first_run {
         // Wipe stale volumes so old secrets don't conflict
         tracing::info!("first run -- generating secrets");
         docker::wipe_volumes(product).await?;
 
-        let mode = select_tls_mode(&dirs, custom_domain).await?;
-
         // Generate secrets and write .env with PROTOCOL (and the domain, if any)
         let secret_pairs = generate_secrets(&manifest);
         let mut env_entries: Vec<(&str, &str)> = secret_pairs.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-        env_entries.extend(tls_env_entries(&mode));
+        env_entries.extend(tls_env_entries(&tls_mode));
 
         secrets::write_env_file(&env_file, &env_entries)?;
-
-        mode
     } else if domain_changed {
         let from = persisted.as_deref().unwrap_or(domain::LOCALHOST);
         let to = custom_domain.as_deref().unwrap_or(domain::LOCALHOST);
@@ -104,14 +110,8 @@ pub async fn up(product: &str, catalog: &dyn Catalog, domain: Option<&str>) -> c
              (e.g. OAuth redirect URIs) may need `run down {product} --fresh` to pick up the new one"
         );
 
-        let mode = select_tls_mode(&dirs, custom_domain).await?;
-        persist_tls_mode(&env_file, &mode)?;
-
-        mode
-    } else {
-        // Recover TLS mode from the existing .env
-        recover_tls_mode(&dirs, &env_file)?
-    };
+        persist_tls_mode(&env_file, &tls_mode)?;
+    }
 
     // Save the chosen inputs so later runs (and `run update`) reuse them
     persist_inputs(&env_file, &chosen_inputs)?;
@@ -268,6 +268,7 @@ pub async fn update(product: &str, catalog: &dyn Catalog, no_backup: bool) -> cr
         fqdn: tls::host(&tls_mode).to_owned(),
         data_dir: dirs.root().display().to_string(),
         inputs: input_values,
+        tls_verify: tls::verified_in_containers(&tls_mode),
     };
     tokens::expand(&mut manifest, &app_ctx);
 

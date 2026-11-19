@@ -7,6 +7,9 @@
 //!   plain `${NAME}`, so the value flows through the generated `.env` and never
 //!   lands in the compose file.
 //! - `${app.name}`, `${app.fqdn}`, `${app.data_dir}` substitute known facts.
+//! - `${tls.reject_unauthorized}` is `1` when a container can verify the
+//!   stack's own certificates and `0` only under local mkcert certificates,
+//!   for `NODE_TLS_REJECT_UNAUTHORIZED` (never disabled at a custom domain).
 //!
 //! Plain `${VAR}` (no namespace) and compose defaults like `${VAR:-default}` are
 //! left untouched for docker compose to interpolate. `${input.*}` is reserved
@@ -23,6 +26,15 @@ pub struct AppContext {
     pub data_dir: String,
     /// Resolved typed-input values, keyed by input key.
     pub inputs: BTreeMap<String, String>,
+    /// Whether containers can verify the stack's own TLS certificates.
+    pub tls_verify: bool,
+}
+
+/// Resolve the `${tls.*}` tokens in a value for a deployment whose certificates
+/// are publicly trusted (a cloud target), leaving every other token untouched.
+#[must_use]
+pub fn resolve_trusted_tls(value: &str) -> String {
+    value.replace("${tls.reject_unauthorized}", "1")
 }
 
 /// Expand magic tokens across a manifest, registering any `${secret.*}` the
@@ -120,6 +132,10 @@ fn resolve_token(inner: &str, app: &AppContext, secrets: &mut BTreeSet<String>) 
             _ => None,
         },
         "input" => app.inputs.get(key).cloned(),
+        "tls" => match key {
+            "reject_unauthorized" => Some(if app.tls_verify { "1" } else { "0" }.to_owned()),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -136,6 +152,7 @@ mod tests {
             fqdn: "localhost".to_owned(),
             data_dir: "/data/myapp".to_owned(),
             inputs: BTreeMap::new(),
+            tls_verify: true,
         }
     }
 
@@ -240,12 +257,41 @@ mod tests {
             fqdn: "localhost".to_owned(),
             data_dir: "/d".to_owned(),
             inputs,
+            tls_verify: true,
         };
         let mut m = manifest(vec![with_env("web", "TZ", "${input.TZ}")]);
 
         expand(&mut m, &app);
 
         assert_eq!(env_value(&m, "web", "TZ"), "Europe/Paris");
+    }
+
+    #[test]
+    fn tls_token_skips_verification_only_when_containers_cannot_verify() {
+        let mut verified = manifest(vec![with_env(
+            "api",
+            "NODE_TLS_REJECT_UNAUTHORIZED",
+            "${tls.reject_unauthorized}",
+        )]);
+        let mut mkcert = verified.clone();
+
+        expand(&mut verified, &ctx());
+        expand(
+            &mut mkcert,
+            &AppContext {
+                tls_verify: false,
+                ..ctx()
+            },
+        );
+
+        assert_eq!(env_value(&verified, "api", "NODE_TLS_REJECT_UNAUTHORIZED"), "1");
+        assert_eq!(env_value(&mkcert, "api", "NODE_TLS_REJECT_UNAUTHORIZED"), "0");
+    }
+
+    #[test]
+    fn trusted_tls_resolution_always_verifies() {
+        assert_eq!(resolve_trusted_tls("${tls.reject_unauthorized}"), "1");
+        assert_eq!(resolve_trusted_tls("${app.fqdn}"), "${app.fqdn}");
     }
 
     #[test]

@@ -421,13 +421,13 @@ mod tests {
 
         let api_block = service_block(&output, "api");
         assert!(
-            api_block.contains("NODE_TLS_REJECT_UNAUTHORIZED: 0"),
+            api_block.contains("NODE_TLS_REJECT_UNAUTHORIZED: ${tls.reject_unauthorized}"),
             "api should have NODE_TLS_REJECT_UNAUTHORIZED"
         );
 
         let app_block = service_block(&output, "app");
         assert!(
-            app_block.contains("NODE_TLS_REJECT_UNAUTHORIZED: 0"),
+            app_block.contains("NODE_TLS_REJECT_UNAUTHORIZED: ${tls.reject_unauthorized}"),
             "app should have NODE_TLS_REJECT_UNAUTHORIZED"
         );
     }
