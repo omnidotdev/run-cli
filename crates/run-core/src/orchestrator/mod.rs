@@ -44,6 +44,13 @@ pub async fn up(product: &str, catalog: &dyn Catalog, domain: Option<&str>) -> c
     let env_file = dirs.env_file();
     let first_run = !secrets::env_file_exists(&env_file);
 
+    // Values saved with the stack on an earlier run (domain and inputs)
+    let saved_env = if first_run {
+        Vec::new()
+    } else {
+        secrets::load_env_file(&env_file)?
+    };
+
     // Settle the public domain before token expansion so `${app.fqdn}` sees it
     let persisted = if first_run { None } else { persisted_domain(&env_file)? };
     let (custom_domain, domain_changed) = resolve_domain(domain, persisted.as_deref())?;
@@ -52,10 +59,11 @@ pub async fn up(product: &str, catalog: &dyn Catalog, domain: Option<&str>) -> c
         ensure_domain_servable(&manifest, custom)?;
     }
 
-    // Resolve typed inputs (env overrides, then defaults), then expand magic
-    // tokens before secrets are generated, so `${secret.*}` is registered for
-    // generation and `${app.*}` / `${input.*}` are inlined
-    let input_values = resolve_inputs(&manifest)?;
+    // Resolve typed inputs (env overrides, saved values, prompts, then
+    // defaults), then expand magic tokens before secrets are generated, so
+    // `${secret.*}` is registered for generation and `${app.*}` / `${input.*}`
+    // are inlined
+    let (input_values, chosen_inputs) = resolve_inputs(&manifest, &saved_env)?;
     let app_ctx = tokens::AppContext {
         name: manifest.name.clone(),
         fqdn: custom_domain.clone().unwrap_or_else(|| domain::LOCALHOST.to_owned()),
@@ -104,6 +112,9 @@ pub async fn up(product: &str, catalog: &dyn Catalog, domain: Option<&str>) -> c
         // Recover TLS mode from the existing .env
         recover_tls_mode(&dirs, &env_file)?
     };
+
+    // Save the chosen inputs so later runs (and `run update`) reuse them
+    persist_inputs(&env_file, &chosen_inputs)?;
 
     // Generate and write Caddyfile
     let routes = manifest.proxy.as_ref().map_or(&[][..], |p| &p.routes);
@@ -249,7 +260,9 @@ pub async fn update(product: &str, catalog: &dyn Catalog, no_backup: bool) -> cr
     let tls_mode = recover_tls_mode(&dirs, &env_file)?;
 
     // Reproduce up()'s manifest preparation so the regenerated compose matches
-    let input_values = resolve_inputs(&manifest)?;
+    let saved_env = secrets::load_env_file(&env_file)?;
+    let (input_values, chosen_inputs) = resolve_inputs(&manifest, &saved_env)?;
+    persist_inputs(&env_file, &chosen_inputs)?;
     let app_ctx = tokens::AppContext {
         name: manifest.name.clone(),
         fqdn: tls::host(&tls_mode).to_owned(),
@@ -473,16 +486,33 @@ fn tls_env_entries(mode: &tls::TlsMode) -> Vec<(&'static str, &str)> {
 /// Rewrite the TLS entries of an existing `.env`, keeping every other value
 /// (generated secrets in particular) untouched.
 fn persist_tls_mode(env_file: &Path, mode: &tls::TlsMode) -> crate::Result<()> {
-    let existing = secrets::load_env_file(env_file)?;
+    secrets::update_env_file(
+        env_file,
+        |k| k == PROTOCOL_ENV_KEY || k == DOMAIN_ENV_KEY,
+        &tls_env_entries(mode),
+    )
+}
 
-    let mut entries: Vec<(&str, &str)> = existing
+/// Save the explicitly chosen input values in the stack's `.env` (as
+/// `RUN_INPUT_<KEY>`, next to the generated secrets), replacing any saved
+/// earlier. Defaults are not saved, so a recipe's new default still applies.
+fn persist_inputs(env_file: &Path, chosen: &BTreeMap<String, String>) -> crate::Result<()> {
+    let entries: Vec<(String, &str)> = chosen
         .iter()
-        .filter(|(k, _)| k != PROTOCOL_ENV_KEY && k != DOMAIN_ENV_KEY)
-        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .filter(|(key, value)| {
+            // A line break would split the entry, so such a value is used for
+            // this run but not saved
+            let single_line = !value.contains(['\n', '\r']);
+            if !single_line {
+                tracing::warn!("input {key} spans several lines and is not saved; pass it again next time");
+            }
+            single_line
+        })
+        .map(|(key, value)| (inputs::env_key(key), value.as_str()))
         .collect();
-    entries.extend(tls_env_entries(mode));
+    let refs: Vec<(&str, &str)> = entries.iter().map(|(k, v)| (k.as_str(), *v)).collect();
 
-    secrets::write_env_file(env_file, &entries)
+    secrets::update_env_file(env_file, |k| k.starts_with(inputs::ENV_PREFIX), &refs)
 }
 
 /// Read the custom domain persisted in a project's `.env`, if any.
@@ -571,25 +601,23 @@ pub fn plan(product: &str, catalog: &dyn Catalog) -> crate::Result<String> {
     Ok(out)
 }
 
-/// Resolve a manifest's typed inputs from `RUN_INPUT_<KEY>` env overrides, then
-/// declared defaults.
-fn resolve_inputs(manifest: &ProductManifest) -> crate::Result<BTreeMap<String, String>> {
+/// Resolve a manifest's typed inputs from `RUN_INPUT_<KEY>` env overrides, the
+/// values saved with the stack, interactive answers, then declared defaults.
+///
+/// Returns the resolved values and the explicitly chosen ones (overrides, saved
+/// values and answers) to save for the next run.
+fn resolve_inputs(
+    manifest: &ProductManifest,
+    saved_env: &[(String, String)],
+) -> crate::Result<(BTreeMap<String, String>, BTreeMap<String, String>)> {
     let Some(defs) = &manifest.inputs else {
-        return Ok(BTreeMap::new());
+        return Ok((BTreeMap::new(), BTreeMap::new()));
     };
 
-    let mut overrides = BTreeMap::new();
+    let mut overrides = inputs::chosen_values(defs, |var| std::env::var(var).ok(), saved_env);
 
-    for def in defs {
-        let var = format!("RUN_INPUT_{}", def.key.to_ascii_uppercase());
-
-        if let Ok(value) = std::env::var(&var) {
-            overrides.insert(def.key.clone(), value);
-        }
-    }
-
-    // Prompt interactively for any input without an env override; a blank answer
-    // falls through to the input's default
+    // Prompt interactively for any input with neither an env override nor a
+    // saved value; a blank answer falls through to the input's default
     if std::io::stdin().is_terminal() {
         for def in defs {
             if overrides.contains_key(&def.key) {
@@ -602,7 +630,9 @@ fn resolve_inputs(manifest: &ProductManifest) -> crate::Result<BTreeMap<String, 
         }
     }
 
-    inputs::resolve(defs, &overrides)
+    let resolved = inputs::resolve(defs, &overrides)?;
+
+    Ok((resolved, overrides))
 }
 
 /// Prompt on stderr for one input, returning the trimmed answer or `None` when
@@ -1271,6 +1301,50 @@ image = "nginx:latest"
             ensure_domain_servable(&manifest, "admin.example.com"),
             Err(crate::Error::InvalidDomain { .. })
         ));
+    }
+
+    #[test]
+    fn chosen_inputs_are_saved_beside_the_secrets() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let env_file = dir.path().join(".env");
+        std::fs::write(&env_file, "DB_PASSWORD=secret\nRUN_INPUT_STALE=old").expect("write env");
+
+        let mut chosen = BTreeMap::new();
+        chosen.insert("oidc_issuer".to_owned(), "https://idp.example.com".to_owned());
+        chosen.insert("note".to_owned(), "two\nlines".to_owned());
+        persist_inputs(&env_file, &chosen).expect("persist");
+
+        let env = secrets::load_env_file(&env_file).expect("load");
+        assert_eq!(
+            env,
+            [
+                ("DB_PASSWORD".to_owned(), "secret".to_owned()),
+                ("RUN_INPUT_OIDC_ISSUER".to_owned(), "https://idp.example.com".to_owned()),
+            ],
+            "stale inputs are replaced and multi-line values are not saved"
+        );
+
+        // The saved value is what the next run resolves
+        let manifest: ProductManifest = toml::from_str(
+            r#"
+name = "x"
+
+[[services]]
+name = "web"
+image = "nginx"
+
+[[inputs]]
+key = "oidc_issuer"
+default = ""
+"#,
+        )
+        .expect("manifest");
+        let defs = manifest.inputs.expect("inputs");
+        let next = inputs::chosen_values(&defs, |_| None, &env);
+        assert_eq!(
+            next.get("oidc_issuer").map(String::as_str),
+            Some("https://idp.example.com")
+        );
     }
 
     #[test]

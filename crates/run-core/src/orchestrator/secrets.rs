@@ -26,6 +26,9 @@ pub fn generate_hex(len: usize) -> String {
 
 /// Write key=value pairs to an env file, one per line.
 ///
+/// The file holds generated secrets and saved inputs, so it is readable by its
+/// owner only (mode `0600` on Unix), including when an existing file is rewritten.
+///
 /// # Errors
 ///
 /// Returns `Error::WriteFile` if the file cannot be written.
@@ -36,10 +39,53 @@ pub fn write_env_file(path: &Path, secrets: &[(&str, &str)]) -> crate::Result<()
         .collect::<Vec<_>>()
         .join("\n");
 
-    std::fs::write(path, content).map_err(|source| Error::WriteFile {
+    write_private(path, content.as_bytes()).map_err(|source| Error::WriteFile {
         path: path.to_owned(),
         source,
     })
+}
+
+/// Rewrite an existing env file: drop every entry whose key matches `drop`,
+/// keep the rest (generated secrets in particular) in order, then append `add`.
+///
+/// # Errors
+///
+/// Returns `Error::ReadFile` or `Error::WriteFile` if the file cannot be read or written.
+pub fn update_env_file(path: &Path, drop: impl Fn(&str) -> bool, add: &[(&str, &str)]) -> crate::Result<()> {
+    let existing = load_env_file(path)?;
+
+    let mut entries: Vec<(&str, &str)> = existing
+        .iter()
+        .filter(|(k, _)| !drop(k))
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    entries.extend_from_slice(add);
+
+    write_env_file(path, &entries)
+}
+
+/// Write a file readable and writable by its owner only.
+#[cfg(unix)]
+fn write_private(path: &Path, content: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+
+    // `mode` only applies on create, so tighten a file left by an older version
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    file.write_all(content)
+}
+
+/// Write a file (no Unix permission bits to set on this platform).
+#[cfg(not(unix))]
+fn write_private(path: &Path, content: &[u8]) -> std::io::Result<()> {
+    std::fs::write(path, content)
 }
 
 /// Parse key=value lines from an env file, skipping blanks and comments.
@@ -88,6 +134,45 @@ pub fn hash_secret(secret: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn env_file_is_owner_only_even_when_rewritten() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(".env");
+        std::fs::write(&path, "OLD=1").expect("write");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+
+        write_env_file(&path, &[("SECRET", "value")]).expect("write env");
+
+        let mode = std::fs::metadata(&path).expect("metadata").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn update_env_file_replaces_matching_entries_and_keeps_the_rest() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(".env");
+        write_env_file(&path, &[("DB_PASSWORD", "secret"), ("RUN_INPUT_TZ", "UTC")]).expect("write");
+
+        update_env_file(
+            &path,
+            |k| k.starts_with("RUN_INPUT_"),
+            &[("RUN_INPUT_TZ", "Europe/Paris")],
+        )
+        .expect("update");
+
+        let env = load_env_file(&path).expect("load");
+        assert_eq!(
+            env,
+            [
+                ("DB_PASSWORD".to_owned(), "secret".to_owned()),
+                ("RUN_INPUT_TZ".to_owned(), "Europe/Paris".to_owned()),
+            ]
+        );
+    }
 
     #[test]
     fn generate_hex_correct_length() {
