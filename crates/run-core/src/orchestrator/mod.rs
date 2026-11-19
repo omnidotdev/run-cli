@@ -177,7 +177,58 @@ pub async fn up(product: &str, catalog: &dyn Catalog, domain: Option<&str>) -> c
     eprintln!("  Logs:  run logs {product}");
     eprintln!("  Wipe:  run down {product} --fresh");
 
+    // The recipe's notes (e.g. a one-time setup token) show only after the
+    // first successful start, never again on later runs
+    if first_run {
+        print_notes(&manifest, &env_file, &runtime_env)?;
+    }
+
     Ok(())
+}
+
+/// Print a recipe's notes, resolved against the stack's env.
+fn print_notes(manifest: &ProductManifest, env_file: &Path, runtime_env: &[(String, String)]) -> crate::Result<()> {
+    let Some(notes) = &manifest.notes else {
+        return Ok(());
+    };
+
+    let env = build_hook_env(env_file, runtime_env)?;
+
+    eprintln!();
+    for line in render_notes(notes, &env).lines() {
+        eprintln!("  {line}");
+    }
+
+    Ok(())
+}
+
+/// Resolve `${NAME}` references in a recipe's notes from the stack's env
+/// (generated secrets plus runtime URLs). Unknown references stay literal.
+fn render_notes(notes: &str, env: &[(String, String)]) -> String {
+    let mut out = String::with_capacity(notes.len());
+    let mut rest = notes;
+
+    while let Some(start) = rest.find("${") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+
+        let Some(end) = after.find('}') else {
+            out.push_str(&rest[start..]);
+            return out;
+        };
+
+        let name = &after[..end];
+
+        match env.iter().find(|(k, _)| k == name) {
+            Some((_, value)) => out.push_str(value),
+            None => out.push_str(&rest[start..=start + 2 + end]),
+        }
+
+        rest = &after[end + 1..];
+    }
+
+    out.push_str(rest);
+    out
 }
 
 /// Stop a running product, optionally wiping all data.
@@ -1347,6 +1398,24 @@ default = ""
             next.get("oidc_issuer").map(String::as_str),
             Some("https://idp.example.com")
         );
+    }
+
+    #[test]
+    fn render_notes_fills_secrets_and_urls() {
+        let env = vec![
+            ("SETUP_TOKEN".to_owned(), "abc123".to_owned()),
+            ("BASE_URL".to_owned(), "https://admin.example.com".to_owned()),
+        ];
+
+        assert_eq!(
+            render_notes("Open ${BASE_URL} and enter ${SETUP_TOKEN}.", &env),
+            "Open https://admin.example.com and enter abc123."
+        );
+    }
+
+    #[test]
+    fn render_notes_leaves_unknown_references_literal() {
+        assert_eq!(render_notes("Use ${MISSING} or ${", &[]), "Use ${MISSING} or ${");
     }
 
     #[test]

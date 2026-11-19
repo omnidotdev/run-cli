@@ -18,6 +18,11 @@ pub struct ProductManifest {
     pub proxy: Option<ProxyConfig>,
     pub hooks: Option<Vec<Hook>>,
     pub inputs: Option<Vec<InputDef>>,
+    /// Message printed once, after the stack's first successful start (e.g. a
+    /// one-time setup token to enter on first sign-in). `${NAME}` resolves
+    /// against the stack's generated secrets and URLs (`BASE_URL`, ...), and
+    /// magic tokens (`${app.*}`, `${input.*}`, `${secret.*}`) work as in services.
+    pub notes: Option<String>,
 }
 
 /// A typed user input a recipe prompts for, referenced via `${input.KEY}`.
@@ -170,6 +175,23 @@ image = "nginx:latest"
         assert!(manifest.proxy.is_none());
         assert!(manifest.hooks.is_none());
         assert!(manifest.inputs.is_none());
+        assert!(manifest.notes.is_none());
+    }
+
+    #[test]
+    fn deserialize_notes() {
+        let toml_str = r#"
+name = "with-notes"
+notes = "Sign in at ${BASE_URL}"
+
+[[services]]
+name = "web"
+image = "nginx:latest"
+"#;
+
+        let manifest: ProductManifest = toml::from_str(toml_str).expect("notes manifest should parse");
+
+        assert_eq!(manifest.notes.as_deref(), Some("Sign in at ${BASE_URL}"));
     }
 
     #[test]

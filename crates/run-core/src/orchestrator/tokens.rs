@@ -46,6 +46,10 @@ pub fn expand(manifest: &mut ProductManifest, app: &AppContext) {
         expand_service(service, app, &mut needed_secrets);
     }
 
+    if let Some(notes) = &mut manifest.notes {
+        *notes = substitute(notes, app, &mut needed_secrets);
+    }
+
     if needed_secrets.is_empty() {
         return;
     }
@@ -193,6 +197,7 @@ mod tests {
             proxy: None,
             hooks: None,
             inputs: None,
+            notes: None,
         }
     }
 
@@ -292,6 +297,23 @@ mod tests {
     fn trusted_tls_resolution_always_verifies() {
         assert_eq!(resolve_trusted_tls("${tls.reject_unauthorized}"), "1");
         assert_eq!(resolve_trusted_tls("${app.fqdn}"), "${app.fqdn}");
+    }
+
+    #[test]
+    fn notes_expand_tokens_and_register_secrets() {
+        let mut m = manifest(vec![service("web")]);
+        m.notes = Some("Open https://${app.fqdn} with ${secret.SETUP_TOKEN}".to_owned());
+
+        expand(&mut m, &ctx());
+
+        assert_eq!(m.notes.as_deref(), Some("Open https://localhost with ${SETUP_TOKEN}"));
+        assert!(
+            m.secrets
+                .expect("secret registered")
+                .auto
+                .iter()
+                .any(|s| s.name == "SETUP_TOKEN")
+        );
     }
 
     #[test]
