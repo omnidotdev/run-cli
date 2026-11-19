@@ -768,6 +768,7 @@ fn generate_secrets(manifest: &ProductManifest) -> Vec<(String, String)> {
             let value = match def.method {
                 crate::config::SecretMethod::Hex => secrets::generate_hex(def.length),
                 crate::config::SecretMethod::Uuid => uuid_v4(),
+                crate::config::SecretMethod::Base64 => secrets::generate_base64(def.length),
             };
 
             (def.name.clone(), value)

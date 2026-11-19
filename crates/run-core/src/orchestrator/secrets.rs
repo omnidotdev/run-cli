@@ -2,7 +2,7 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 use base64::Engine as _;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use sha2::{Digest, Sha256};
 
 use crate::Error;
@@ -22,6 +22,20 @@ pub fn generate_hex(len: usize) -> String {
         let _ = write!(acc, "{b:02x}");
         acc
     })
+}
+
+/// Generate `len` random bytes encoded as standard, padded base64.
+///
+/// # Panics
+///
+/// Panics if the operating system's random source is unavailable, which should
+/// not happen on a supported platform.
+#[must_use]
+pub fn generate_base64(len: usize) -> String {
+    let mut buf = vec![0u8; len];
+    getrandom::fill(&mut buf).expect("OS random source should be available");
+
+    STANDARD.encode(buf)
 }
 
 /// Write key=value pairs to an env file, one per line.
@@ -172,6 +186,15 @@ mod tests {
                 ("RUN_INPUT_TZ".to_owned(), "Europe/Paris".to_owned()),
             ]
         );
+    }
+
+    #[test]
+    fn generate_base64_decodes_to_the_requested_bytes() {
+        let encoded = generate_base64(32);
+        let decoded = STANDARD.decode(&encoded).expect("valid base64");
+
+        assert_eq!(decoded.len(), 32);
+        assert_ne!(generate_base64(32), encoded, "each call should be random");
     }
 
     #[test]

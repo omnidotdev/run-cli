@@ -95,8 +95,13 @@ pub struct SecretDef {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SecretMethod {
+    /// `length` random bytes as lowercase hex (`2 * length` characters)
     Hex,
+    /// A random UUID v4 (`length` is ignored)
     Uuid,
+    /// `length` random bytes as standard, padded base64, for apps that expect a
+    /// base64-encoded key of an exact size (e.g. a 32-byte encryption key)
+    Base64,
 }
 
 /// TLS configuration.
@@ -255,6 +260,26 @@ image = "nginx:latest"
         assert!(svc.cap_add.is_none());
         assert!(svc.security_opt.is_none());
         assert!(svc.ulimits.is_none());
+    }
+
+    #[test]
+    fn deserialize_base64_secret_method() {
+        let toml_str = r#"
+name = "keys"
+
+[[services]]
+name = "web"
+image = "nginx:latest"
+
+[secrets]
+auto = [{ name = "ENCRYPTION_KEY", method = "base64", length = 32 }]
+"#;
+
+        let manifest: ProductManifest = toml::from_str(toml_str).expect("base64 secret should parse");
+        let secret = &manifest.secrets.expect("secrets should be defined").auto[0];
+
+        assert!(matches!(secret.method, SecretMethod::Base64));
+        assert_eq!(secret.length, 32);
     }
 
     #[test]
