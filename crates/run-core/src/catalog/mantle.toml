@@ -1,0 +1,133 @@
+name = "mantle"
+display_name = "Mantle"
+description = "Self-hosted Mantle instance"
+notes = """
+Register Mantle with your OpenID Connect provider as a confidential client with
+the redirect URI ${BASE_URL}/api/auth/callback/omni, then open ${BASE_URL}.
+"""
+
+# Sign-in uses an OpenID Connect provider the operator already runs (any
+# standard provider, or Omni Gatekeeper). Each user without Omni workspace
+# claims gets a personal workspace (PERSONAL_WORKSPACE_FALLBACK)
+
+# ── Services ──────────────────────────────────────────────────────────
+
+[[services]]
+name = "db"
+image = "postgres:18-alpine"
+# Postgres 18 places data under a versioned subdirectory, so the volume mounts
+# at /var/lib/postgresql, not /data
+volumes = ["db_data:/var/lib/postgresql"]
+
+[services.environment]
+POSTGRES_DB = "mantle"
+POSTGRES_USER = "postgres"
+POSTGRES_PASSWORD = "${DB_PASSWORD}"
+
+[services.healthcheck]
+test = ["CMD-SHELL", "pg_isready -U postgres -d mantle"]
+interval = "5s"
+timeout = "5s"
+retries = 5
+
+[[services]]
+name = "api"
+# Self-host image published by mantle-api's release workflow
+image = "api.manifold.omni.dev/omnidotdev/mantle-api:latest"
+depends_on = [{ service = "db", condition = "service_healthy" }]
+
+[services.environment]
+NODE_ENV = "production"
+PORT = "4000"
+DATABASE_URL = "postgres://postgres:${DB_PASSWORD}@db:5432/mantle"
+CORS_ALLOWED_ORIGINS = "${BASE_URL}"
+AUTH_JWKS_URL = "${input.oidc_jwks_url}"
+PERSONAL_WORKSPACE_FALLBACK = "${input.personal_workspaces}"
+
+[services.healthcheck]
+test = ["CMD-SHELL", "bun -e \"fetch('http://127.0.0.1:4000/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+interval = "10s"
+timeout = "5s"
+retries = 5
+start_period = "30s"
+
+[[services]]
+name = "app"
+# Self-host image published by mantle-app's release workflow
+image = "api.manifold.omni.dev/omnidotdev/mantle-app:latest"
+# Server-side rendering calls the API and the sign-in provider at their public
+# URLs, so `localhost` must reach the host proxy from inside the container
+extra_hosts = ["localhost:host-gateway"]
+depends_on = [{ service = "api", condition = "service_healthy" }]
+
+[services.environment]
+NODE_ENV = "production"
+PORT = "3000"
+VITE_BASE_URL = "${BASE_URL}"
+VITE_API_URL = "${API_BASE_URL}"
+AUTH_SECRET = "${AUTH_SECRET}"
+AUTH_BASE_URL = "${input.oidc_issuer}"
+AUTH_CLIENT_ID = "${input.oidc_client_id}"
+AUTH_CLIENT_SECRET = "${input.oidc_client_secret}"
+PERSONAL_WORKSPACE_FALLBACK = "${input.personal_workspaces}"
+# Trust the stack's own local certificates when calling the API over the proxy
+NODE_TLS_REJECT_UNAUTHORIZED = "${tls.reject_unauthorized}"
+
+[[services]]
+name = "caddy"
+image = "caddy:2-alpine"
+depends_on = [
+  { service = "app", condition = "service_started" },
+  { service = "api", condition = "service_started" },
+]
+
+# ── Inputs ────────────────────────────────────────────────────────────
+
+[[inputs]]
+key = "oidc_issuer"
+label = "OpenID Connect issuer URL (serves /.well-known/openid-configuration)"
+required = true
+
+[[inputs]]
+key = "oidc_jwks_url"
+label = "OpenID Connect JWKS URL (jwks_uri from the provider's discovery document)"
+required = true
+
+[[inputs]]
+key = "oidc_client_id"
+label = "OpenID Connect client ID"
+required = true
+
+[[inputs]]
+key = "oidc_client_secret"
+label = "OpenID Connect client secret"
+type = "password"
+required = true
+
+[[inputs]]
+key = "personal_workspaces"
+label = "Give each user a personal workspace (true unless the provider is Omni Gatekeeper)"
+type = "boolean"
+default = "true"
+
+# ── Secrets ───────────────────────────────────────────────────────────
+
+[secrets]
+auto = [
+  { name = "DB_PASSWORD", method = "hex", length = 32 },
+  { name = "AUTH_SECRET", method = "hex", length = 32 },
+]
+
+# ── TLS ───────────────────────────────────────────────────────────────
+
+[tls]
+provider = "mkcert"
+
+# ── Proxy ─────────────────────────────────────────────────────────────
+
+[proxy]
+provider = "caddy"
+routes = [
+  { name = "app", listen_port = 443, listen_port_http = 80, target = "app:3000" },
+  { name = "api", listen_port = 4000, target = "api:4000" },
+]

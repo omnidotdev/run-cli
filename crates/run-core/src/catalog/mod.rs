@@ -36,6 +36,9 @@ const PIHOLE_TOML: &str = include_str!("pihole.toml");
 /// Embedded Backfeed manifest TOML.
 const BACKFEED_TOML: &str = include_str!("backfeed.toml");
 
+/// Embedded Mantle manifest TOML.
+const MANTLE_TOML: &str = include_str!("mantle.toml");
+
 impl Catalog for EmbeddedCatalog {
     fn get(&self, product: &str) -> crate::Result<ProductManifest> {
         match product {
@@ -44,6 +47,7 @@ impl Catalog for EmbeddedCatalog {
             "uptime-kuma" => toml::from_str(UPTIME_KUMA_TOML).map_err(|source| crate::Error::ParseManifest { source }),
             "pihole" => toml::from_str(PIHOLE_TOML).map_err(|source| crate::Error::ParseManifest { source }),
             "backfeed" => toml::from_str(BACKFEED_TOML).map_err(|source| crate::Error::ParseManifest { source }),
+            "mantle" => toml::from_str(MANTLE_TOML).map_err(|source| crate::Error::ParseManifest { source }),
             _ => Err(crate::Error::ProductNotFound(product.to_owned())),
         }
     }
@@ -51,6 +55,7 @@ impl Catalog for EmbeddedCatalog {
     fn list(&self) -> Vec<String> {
         vec![
             "backfeed".to_owned(),
+            "mantle".to_owned(),
             "pihole".to_owned(),
             "runa".to_owned(),
             "uptime-kuma".to_owned(),
@@ -263,6 +268,40 @@ mod tests {
     }
 
     #[test]
+    fn mantle_manifest_parses() {
+        let catalog = default_catalog();
+        let manifest = catalog.get("mantle").expect("mantle manifest should parse");
+
+        assert_eq!(manifest.name, "mantle");
+        assert_eq!(manifest.services.len(), 4);
+        assert!(
+            manifest.notes.is_some(),
+            "mantle should print the redirect URI to register"
+        );
+
+        // sign-in needs an OpenID Connect provider, so its settings are required inputs
+        let inputs = manifest.inputs.expect("mantle should prompt for its sign-in provider");
+        for key in ["oidc_issuer", "oidc_jwks_url", "oidc_client_id", "oidc_client_secret"] {
+            let input = inputs
+                .iter()
+                .find(|input| input.key == key)
+                .expect("input should exist");
+            assert_eq!(input.required, Some(true), "{key} should be required");
+        }
+
+        // Postgres 18 refuses a volume mounted at /var/lib/postgresql/data
+        let db = manifest
+            .services
+            .iter()
+            .find(|service| service.name == "db")
+            .expect("db service");
+        assert_eq!(
+            db.volumes.as_deref(),
+            Some(&["db_data:/var/lib/postgresql".to_owned()][..])
+        );
+    }
+
+    #[test]
     fn unknown_product_returns_error() {
         let catalog = default_catalog();
         assert!(catalog.get("nonexistent").is_err());
@@ -464,7 +503,10 @@ services:
         let catalog = default_catalog();
         let products = catalog.list();
 
-        assert_eq!(products, vec!["backfeed", "pihole", "runa", "uptime-kuma", "vortex"]);
+        assert_eq!(
+            products,
+            vec!["backfeed", "mantle", "pihole", "runa", "uptime-kuma", "vortex"]
+        );
     }
 
     #[test]
