@@ -3,7 +3,7 @@ display_name = "Mantle"
 description = "Self-hosted Mantle instance"
 notes = """
 Register Mantle with your OpenID Connect provider as a confidential client with
-the redirect URI ${BASE_URL}/api/auth/oauth2/callback/omni, then open ${BASE_URL}.
+the redirect URI ${BASE_URL}/api/auth/callback/omni, then open ${BASE_URL}.
 """
 
 # Sign-in uses an OpenID Connect provider the operator already runs (any
