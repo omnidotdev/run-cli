@@ -32,8 +32,8 @@ retries = 5
 
 [[services]]
 name = "api"
-# Self-host image published by mantle-api's release workflow
-image = "api.manifold.omni.dev/omnidotdev/mantle-api:latest"
+# Self-host image promoted from the production build, pinned by digest
+image = "api.manifold.omni.dev/omnidotdev/mantle-api@sha256:ef314e250efd1fb621ce5288c76ba433a411ac1e07dd2450c5542fbe0a3ac22e"
 depends_on = [{ service = "db", condition = "service_healthy" }]
 
 [services.environment]
@@ -53,8 +53,8 @@ start_period = "30s"
 
 [[services]]
 name = "app"
-# Self-host image published by mantle-app's release workflow
-image = "api.manifold.omni.dev/omnidotdev/mantle-app:latest"
+# Self-host image promoted from the production build, pinned by digest
+image = "api.manifold.omni.dev/omnidotdev/mantle-app@sha256:99cc748c91be9a68bbda436be6b5ef7e3f055d2e0b691fea4bb51e7ac9369bde"
 # Server-side rendering calls the API and the sign-in provider at their public
 # URLs, so `localhost` must reach the host proxy from inside the container
 extra_hosts = ["localhost:host-gateway"]
